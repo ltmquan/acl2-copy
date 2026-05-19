@@ -74,17 +74,6 @@
   (declare (xargs :mode :program :stobjs (state)))
   (cdr (assoc :enabled (table-alist 'ai-summary-table (w state)))))
 
-; Candidate count: number of beam-search candidates to try.
-; Default is 5 (beam-width); override with (set-ai-candidates N).
-(table ai-candidates-table :count 5)
-
-(defmacro set-ai-candidates (n)
-  `(table ai-candidates-table :count ,n))
-
-(defun ai-candidates-count (state)
-  (declare (xargs :mode :program :stobjs (state)))
-  (let ((v (cdr (assoc :count (table-alist 'ai-candidates-table (w state))))))
-    (if (posp v) v 5)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;; Section 5: String Utilities + Definition Extraction Helpers
@@ -253,25 +242,23 @@
         (cons (car forms) (filter-property-forms (cdr forms)))
       (filter-property-forms (cdr forms)))))
 
-; ai-call-model: call the AI and shape-check results.
-; Returns (mv erp raw-forms) where raw-forms is a list of (property ...) forms.
-;   erp = nil    -> raw-forms is a non-empty list of well-formed (property ...) forms
-;   erp = string -> model/parse error or no valid forms; raw-forms is nil
+; ai-call-model: call the AI and shape-check the result.
+; Returns (mv erp raw-form) where raw-form is a (property ...) form.
+;   erp = nil    -> raw-form is a well-formed (property ...) form
+;   erp = string -> model/parse error or bad shape; raw-form is nil
 (defun ai-call-model (defs-str thm-str chk-str)
   (declare (xargs :mode :program))
   (b* (
-       ; call the model; query-ai returns (mv erp forms-list)
-       ((mv ai-erp raw-forms) (query-ai defs-str thm-str chk-str))
+       ; call the model; query-ai returns (mv erp form)
+       ((mv ai-erp raw-form) (query-ai defs-str thm-str chk-str))
        ; bail early if the model returned an error
        ((when ai-erp) (mv ai-erp nil))
-       ; filter to well-formed (property ...) forms
-       (valid-forms (filter-property-forms raw-forms))
-       ; bail if none survived the filter
-       ((when (null valid-forms))
+       ; check the form is a well-formed (property ...) form
+       ((when (not (and (consp raw-form) (eq (car raw-form) 'property))))
         (mv (acl2s-fms-to-string
-             "AI output contained no valid (property ...) forms: ~x0"
-             (list (cons #\0 raw-forms))) nil)))
-    (mv nil valid-forms)))
+             "AI output was not a valid (property ...) form: ~x0"
+             (list (cons #\0 raw-form))) nil)))
+    (mv nil raw-form)))
 
 ; ai-admit-and-check: admit raw-form via skip-proofs and verify it landed in the world.
 ; Returns (value nil) on success; (mv t nil state) on failure to stop er-progn.
@@ -392,25 +379,6 @@
        (retry-sub-info (caddr val-result)))
     (mv raw-form nil val-ok retry-top-info retry-sub-info state)))
 
-; ai-try-candidates: iterate beam candidates; stop at first winner.
-; Returns (mv n form cts-found val-ok retry-top retry-sub state).
-; best-form: first candidate tried — used as fallback display if none win.
-; n: 1-based index of the candidate that was last tried (or that won).
-(defun ai-try-candidates (candidates best-form n prop-form ctx summary-p state)
-  (declare (xargs :mode :program :stobjs (state)))
-  (if (endp candidates)
-      (mv n best-form nil nil :unavailable :unavailable state)
-    (b* ((raw-form  (car candidates))
-         (best-form (if (null best-form) raw-form best-form))
-         (- (cw "~%[Candidate ~x0] ~x1~%" n raw-form))
-         ((mv raw-form cts-found val-ok retry-top retry-sub state)
-          (ai-try-one-candidate raw-form prop-form ctx summary-p state))
-         ; stop if this candidate closes the proof
-         ((when val-ok)
-          (mv n raw-form cts-found val-ok retry-top retry-sub state)))
-      (ai-try-candidates (cdr candidates) best-form (1+ n)
-                         prop-form ctx summary-p state))))
-
 ; ai-property-fn: top-level AI pipeline.
 ; Called by ai-property when both the global flag and :ai t are active.
 ; Runs all trans-eval operations first (ACL2s prints freely), then prints
@@ -435,26 +403,23 @@
        ; Step 3: collect defs and stringify theorem for the prompt
        (defs-str (collect-defs-string body state))
        (thm-str  (acl2s-fms-to-string "~x0" (list (cons #\0 prop-form))))
-       ; Step 4: query model — returns list of (property ...) candidate forms
-       ((mv ai-erp raw-forms) (if chk-str
-                                  (ai-call-model defs-str thm-str chk-str)
-                                (mv "no checkpoint available" nil)))
-       ; total candidates for summary display
-       (k (if (and (not ai-erp) (consp raw-forms)) (length raw-forms) 0))
-       ; Steps 5-6: cgen + validation for each candidate; stop at first winner
-       ((mv cand-n raw-form cts-found val-ok retry-top-info retry-sub-info state)
+       ; Step 4: query model — returns a single (property ...) form
+       ((mv ai-erp raw-form) (if chk-str
+                                 (ai-call-model defs-str thm-str chk-str)
+                               (mv "no checkpoint available" nil)))
+       ; Steps 5-6: cgen plausibility check + validation
+       ((mv & cts-found val-ok retry-top-info retry-sub-info state)
         (if ai-erp
-            (mv 0 nil nil nil :unavailable :unavailable state)
-          (ai-try-candidates raw-forms nil 1 prop-form ctx summary-p state)))
+            (mv nil nil nil :unavailable :unavailable state)
+          (ai-try-one-candidate raw-form prop-form ctx summary-p state)))
        ; Step 7: print entire AI summary block after all proof output
        (- (cw "~%"))
        (- (cw? summary-p "**Summary of AI Assistance**~%"))
        (- (cw? summary-p "Proof of ~x0 failed.~%" name))
        (- (and summary-p (print-checkpoints init-top-info init-sub-info state)))
-       (- (cond (ai-erp (cw "AI query failed: ~s0~%" ai-erp))
-                ((> k 1) (cw "Suggested lemma (candidate ~x0/~x1):~% -- ~x2~%"
-                             cand-n k raw-form))
-                (t (cw "Suggested lemma:~% -- ~x0~%" raw-form))))
+       (- (if ai-erp
+              (cw "AI query failed: ~s0~%" ai-erp)
+            (cw "Suggested lemma:~% -- ~x0~%" raw-form)))
        (- (and summary-p (not ai-erp) raw-form
                (cw "Plausibility check (cgen): ~s0~%"
                    (if cts-found

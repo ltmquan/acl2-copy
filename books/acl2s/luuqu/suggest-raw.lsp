@@ -36,38 +36,26 @@
 ;;;          theorem    string -- the full (property ...) form as a string
 ;;;          checkpoint string -- first failed subgoal from checkpoint-list-pretty
 ;;;
-;;; Returns: (values erp forms)   [standard CL multiple values]
-;;;   erp  = nil    -> forms is a list of parsed Lisp s-expressions (best-first)
-;;;   erp  = string -> parse/model error; forms is nil
-;;;
-;;; Calls suggest-lemma-beam to get K candidate strings via beam search,
-;;; then parses each into a (property ...) form. The ACL2 side does shape
-;;; checking. State is not taken or returned.
+;;; Returns: (values erp form)   [standard CL multiple values]
+;;;   erp  = nil    -> form is a parsed Lisp s-expression
+;;;   erp  = string -> parse/model error; form is nil
 
-(defun %parse-property-form (raw-str)
-  "Parse a single model output string into a (property ...) form.
-Returns the form, or NIL if no valid form found."
+(defun query-ai-raw (defs theorem checkpoint)
   (handler-case
-    (let* ((trimmed (string-trim '(#\Space #\Newline #\Tab #\Return) raw-str))
+    (let* (;; Call the model for a single candidate string.
+           (raw (cl-llama:suggest-lemma defs theorem checkpoint))
+           ;; Trim whitespace.
+           (trimmed (string-trim '(#\Space #\Newline #\Tab #\Return) raw))
+           ;; Find the start of the (property ...) form.
            (prop-pos (or (search "(property " trimmed :test #'char-equal)
                          (search "(acl2s::property " trimmed :test #'char-equal)))
            (paren-pos (or prop-pos (position #\( trimmed))))
       (if (null paren-pos)
-          nil
-        (let ((*package* (find-package "ACL2S")))
-          (read-from-string trimmed nil nil :start paren-pos))))
-    (error () nil)))
-
-(defun query-ai-raw (defs theorem checkpoint &key (beam-width 5))
-  (handler-case
-    (let* (;; Step A: Call the model via beam search.
-           (strings (cl-llama:suggest-lemma-beam defs theorem checkpoint
-                                                  :beam-width beam-width))
-           ;; Step B: Parse each candidate string into a Lisp form.
-           (forms (remove nil (mapcar #'%parse-property-form strings))))
-      (if forms
-          (values nil forms)
-        (values "query-ai-raw: no valid (property ...) form in any beam output" nil)))
-    ;; Step C: Catch any error (model error, parse error, etc.).
+          (values (format nil "query-ai-raw: no ( found in output: ~S" trimmed) nil)
+        (let* ((*package* (find-package "ACL2S"))
+               (form (read-from-string trimmed nil nil :start paren-pos)))
+          (if form
+              (values nil form)
+            (values (format nil "query-ai-raw: read-from-string returned nil for: ~S" trimmed) nil)))))
     (error (e)
       (values (format nil "query-ai-raw: ~A" e) nil))))
