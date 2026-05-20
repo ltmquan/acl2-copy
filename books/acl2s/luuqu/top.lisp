@@ -7,9 +7,7 @@
 ;;;; Section 1: Includes
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-;(include-book "tools/include-raw"             :dir :system)
 (include-book "kestrel/utilities/checkpoints" :dir :system :ttags :all)
-;(include-book "acl2s/cgen/top"               :dir :system :ttags :all)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;; Section 2: Ttag + Raw Lisp Load
@@ -44,35 +42,12 @@
 ; NOTE: defun-bridge auto-generates (declare (xargs :mode :program)); adding
 ; a second xargs via :program-declare causes ACL2 to reject. State is omitted
 ; since query-ai-raw ignores it, eliminating the stobjs-declare problem.
-(acl2::defun-bridge query-ai (defs theorem checkpoint)
+(acl2::defun-bridge query-ai (defs theorem checkpoint proven-lemmas seed verbose)
   :program (mv "raw Lisp not loaded" nil)
-  :raw (query-ai-raw defs theorem checkpoint))
+  :raw (query-ai-raw defs theorem checkpoint proven-lemmas seed :verbose verbose))
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;; Section 4: AI Automation Global Flag
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-; Stored in an ACL2 table so it integrates with undo/revert machinery.
-(table ai-automation-table :enabled nil)
-
-; User-facing control: (set-ai-automation t) or (set-ai-automation nil).
-(defmacro set-ai-automation (flag)
-  `(table ai-automation-table :enabled ,flag))
-
-; Read the current flag value in program-mode code.
-(defun ai-automation-enabled-p (state)
-  (declare (xargs :mode :program :stobjs (state)))
-  (cdr (assoc :enabled (table-alist 'ai-automation-table (w state)))))
-
-; Summary mode: suppress raw proof output, emit structured report instead.
-(table ai-summary-table :enabled nil)
-
-(defmacro set-ai-summary (flag)
-  `(table ai-summary-table :enabled ,flag))
-
-(defun ai-summary-enabled-p (state)
-  (declare (xargs :mode :program :stobjs (state)))
-  (cdr (assoc :enabled (table-alist 'ai-summary-table (w state)))))
+; Section 4 removed — no global automation flag.
+; Use (auto <form>) to invoke AI proof search directly.
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -169,6 +144,41 @@
               (acl2::all-fnnames translated))))
     (fn-def-strings (filter-user-fns fns state) state)))
 
+; property-form-to-defthm: convert (property name (v1 :t1 v2 :t2 ...) body) to
+; the equivalent plain (defthm name prop) form.
+;
+; Background: ACL2s's property macro always re-enables the 'comment output channel
+; inside its generated with-output forms (via :on (comment summary)).  This makes
+; it impossible to suppress property's cw output via any outer with-output wrapper.
+; By converting to a plain defthm — which uses the standard ACL2 event machinery
+; and respects inhibit-output-lst — we can suppress all output inside trans-eval.
+;
+; Returns the defthm form on success, nil if the form doesn't have the expected
+; (property name vars body) structure (e.g., complex multi-clause bodies).
+(defun property-form-to-defthm (form state)
+  (declare (xargs :mode :program :stobjs (state)))
+  (and (consp form)
+       (eq (car form) 'property)
+       (consp (cdr form))
+       (symbolp (cadr form))           ; name
+       (consp (cddr form))
+       (true-listp (caddr form))       ; vars list
+       (consp (cdddr form))            ; body present
+       (let* ((name     (cadr  form))
+              (vars-lst (caddr form))
+              (body     (cadddr form))
+              (pkg      (current-package state))
+              (wrld     (w state))
+              (tbl      (table-alist 'type-metadata-table wrld))
+              (atbl     (table-alist 'type-alias-table wrld))
+              (vars     (evens vars-lst))
+              (types    (odds  vars-lst))
+              (i-types  (map-intern-types types pkg))
+              (preds    (map-preds i-types tbl atbl))
+              (hyp      (make-input-contract vars preds))
+              (prop     (if (eq hyp t) body `(implies ,hyp ,body))))
+         `(defthm ,name ,prop))))
+
 ; Print one checkpoint entry in ACL2 style: clause-id label then prettyified formula.
 ; entry is one alist from checkpoint-info-list: keys :clause-id and :clause.
 (defun print-one-chk-entry (entry state)
@@ -205,6 +215,49 @@
     (print-chk-section "at the top level:" top-info state)
     (print-chk-section "under a top-level induction:" sub-info state)))
 
+; Print one validation step line in ACL2s style.
+; label should be a fixed-width string with trailing spaces (padding baked in).
+; ok=t prints [*], ok=nil prints [FAILED].
+(defun %check-line (label ok)
+  (declare (xargs :mode :program))
+  (cw "~s0~s1~%" label (if ok "[*]" "[FAILED]")))
+
+; Format a list of proven property forms into a newline-separated string
+; suitable for inclusion in the AI prompt's "Proven lemmas" section.
+; proven is in proved order (first proved = first in list).
+(defun format-proven-str (proven)
+  (declare (xargs :mode :program))
+  (if (endp proven)
+      ""
+    (concatenate 'string
+                 (acl2s-fms-to-string "~x0" (list (cons #\0 (car proven))))
+                 (string #\Newline)
+                 (format-proven-str (cdr proven)))))
+
+; Print the proof sequence with 1-based indices.
+(defun print-proof-seq-aux (forms idx)
+  (declare (xargs :mode :program))
+  (if (endp forms)
+      nil
+    (prog2$ (cw "  ~x0. ~x1~%" idx (car forms))
+            (print-proof-seq-aux (cdr forms) (1+ idx)))))
+
+(defun print-proof-sequence (forms)
+  (declare (xargs :mode :program))
+  (print-proof-seq-aux forms 1))
+
+; Extract the body/formula expression from an event form for AI defs scanning.
+; For (property name vars body ...): the 4th element is the body.
+; For (defthm name prop ...): the 3rd element is the formula.
+; Otherwise: fall back to the whole form (symbols still get scanned).
+(defun form-proof-body (form)
+  (declare (xargs :mode :program))
+  (and (consp form)
+       (case (car form)
+         (property (and (consp (cdddr form)) (cadddr form)))
+         (defthm   (and (consp (cddr form))  (caddr form)))
+         (t        form))))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;; Section 6: Core Orchestration
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -233,234 +286,319 @@
                            (consp chk-list)))))
     (mv failed-p chk-list state)))
 
-; filter-property-forms: keep only well-formed (property ...) forms from a list.
-(defun filter-property-forms (forms)
-  (declare (xargs :mode :program))
-  (if (endp forms)
-      nil
-    (if (and (consp (car forms)) (eq (caar forms) 'property))
-        (cons (car forms) (filter-property-forms (cdr forms)))
-      (filter-property-forms (cdr forms)))))
-
 ; ai-call-model: call the AI and shape-check the result.
-; Returns (mv erp raw-form) where raw-form is a (property ...) form.
-;   erp = nil    -> raw-form is a well-formed (property ...) form
-;   erp = string -> model/parse error or bad shape; raw-form is nil
-(defun ai-call-model (defs-str thm-str chk-str)
+; proven-str is a newline-separated string of already-proved property forms (or "").
+; seed varies per search to get non-deterministic variation across searches.
+; Returns (mv erp raw-form) where raw-form is a (property ...) form on success.
+(defun ai-call-model (defs-str thm-str chk-str proven-str seed verbose)
   (declare (xargs :mode :program))
   (b* (
-       ; call the model; query-ai returns (mv erp form)
-       ((mv ai-erp raw-form) (query-ai defs-str thm-str chk-str))
-       ; bail early if the model returned an error
+       ((mv ai-erp raw-form) (query-ai defs-str thm-str chk-str proven-str seed verbose))
        ((when ai-erp) (mv ai-erp nil))
-       ; check the form is a well-formed (property ...) form
        ((when (not (and (consp raw-form) (eq (car raw-form) 'property))))
         (mv (acl2s-fms-to-string
              "AI output was not a valid (property ...) form: ~x0"
              (list (cons #\0 raw-form))) nil)))
     (mv nil raw-form)))
 
-; ai-admit-and-check: admit raw-form via skip-proofs and verify it landed in the world.
-; Returns (value nil) on success; (mv t nil state) on failure to stop er-progn.
-(defun ai-admit-and-check (raw-form ctx state)
+; ai-readmit-one: silently re-admit a single proven property form via skip-proofs.
+; Uses property-form-to-defthm so suppression works (property re-enables 'comment).
+; Returns (mv erp state).
+(defun ai-readmit-one (prop-form ctx state)
   (declare (xargs :mode :program :stobjs (state)))
-  (b* (
-       ; admit the suggested lemma silently via skip-proofs
-       ((mv admit-erp & state)
-        (acl2::trans-eval `(with-output :off :all! (skip-proofs ,raw-form)) ctx state t))
-       ; extract the lemma name from the (property name ...) form
-       (lemma-name (and (consp raw-form)
-                        (consp (cdr raw-form))
-                        (cadr raw-form)))
-       ; verify the lemma actually landed in the world after admission
-       (in-world-p (and lemma-name
-                        (symbolp lemma-name)
-                        (consp (acl2::getpropc
-                                 lemma-name 'acl2::theorem nil (w state)))))
-       ; admitted and in world: return success
-       ((when (and (not admit-erp) in-world-p)) (value nil))
-       ; otherwise report failure; (mv t nil state) stops er-progn
-       (- (cw "Validation: Suggested lemma failed admission check.~%")))
-    (mv t nil state)))
-
-; ai-retry-and-report: retry the original proof with the suggested lemma in scope.
-; Reports whether the proof closes or still fails; always returns (value nil).
-(defun ai-retry-and-report (raw-form prop-form ctx summary-p state)
-  (declare (xargs :mode :program :stobjs (state)))
-  (b* (
-       ; retry the original proof with the lemma now in scope
-       ((mv retry-erp & state)
+  (b* ((defthm-form (property-form-to-defthm prop-form state))
+       (admit-form  (or defthm-form prop-form))
+       ((mv erp & state)
         (acl2::trans-eval
-          `(with-output :off :all :inhibit-er-hard t
-             (with-output :gag-mode t ,prop-form))
-          ctx state t))
-       ; collect post-induction checkpoints after the retry
-       (retry-chk (acl2::checkpoint-list-pretty nil state))
-       ; retry succeeded if no error and no open checkpoints remain
-       (retry-ok  (and (not retry-erp)
-                       (or (eq retry-chk :unavailable)
-                           (null retry-chk))))
-       ; announce success and usage instructions if proof closes
-       (- (and retry-ok (cw "Validation: Proof closes with suggested lemma!~%")))
-       (- (and retry-ok (cw "To use: first prove the lemma, then re-submit:~%")))
-       (- (and retry-ok (cw " -- ~x0~%" raw-form)))
-       ((when retry-ok) (value nil))
-       ; proof still fails: report
-       (- (cw "Validation: Proof still fails with suggested lemma.~%")))
-    (value nil)))
+          `(with-output :off :all! (skip-proofs ,admit-form))
+          ctx state t)))
+    (mv erp state)))
 
-; ai-validate-pipeline: chains admit-and-check then retry-and-report via er-progn.
-; If admission fails, er-progn stops and retry is skipped entirely.
-(defun ai-validate-pipeline (raw-form prop-form ctx summary-p state)
+; ai-readmit-all: re-admit every form in proven (in order) silently.
+; proven should be in proof order: first proved = first in list.
+; Returns (mv erp state).
+(defun ai-readmit-all (proven ctx state)
   (declare (xargs :mode :program :stobjs (state)))
-  (er-progn
-    (ai-admit-and-check raw-form ctx state)
-    (ai-retry-and-report raw-form prop-form ctx summary-p state)))
+  (if (endp proven)
+      (mv nil state)
+    (b* (((mv erp state) (ai-readmit-one (car proven) ctx state))
+         ((when erp) (mv erp state)))
+      (ai-readmit-all (cdr proven) ctx state))))
 
-; ai-validate-lemma: runs ai-validate-pipeline inside a reverted world.
-; World is clean on return; callers ignore the first two values.
-(defun ai-validate-lemma (raw-form prop-form ctx summary-p state)
-  (declare (xargs :mode :program :stobjs (state)))
-  (er-progn
-    (revert-world (ai-validate-pipeline raw-form prop-form ctx summary-p state))
-    (value nil)))
-
-; ai-validate-silent: admit raw-form via skip-proofs then retry prop-form.
-; Returns (value (list val-ok top-info sub-info)) where val-ok=t means the
-; proof closed with the admitted lemma, and top-info/sub-info are the
-; checkpoint-info-lists from the retry attempt (for display when val-ok=nil).
-; No cw output. Caller must wrap in revert-world.
-(defun ai-validate-silent (raw-form prop-form ctx state)
+; ai-try-proof-timed: attempt to prove prop-form with optional time-limit.
+; All proof output is suppressed; checkpoints are still saved via :gag-mode t.
+; Returns (mv result chk-list state) where result is :proved, :timeout, or :failed.
+;
+; WARNING: (with-output :off :all ...) suppresses proof-failure errors, making
+; erp unreliable as a success indicator (erp=nil even on failure).
+; We therefore use the world check — if the theorem name landed in the world,
+; the proof succeeded. This matches the pattern from the old ai-validate-steps.
+;
+; Does NOT use revert-world — caller is responsible for world management.
+(defun ai-try-proof-timed (prop-form time-limit ctx state)
   (declare (xargs :mode :program :stobjs (state)))
   (b* (
-       ((mv admit-erp & state)
-        (acl2::trans-eval `(skip-proofs ,raw-form) ctx state t))
-       (lemma-name (and (consp raw-form) (consp (cdr raw-form)) (cadr raw-form)))
-       (in-world-p (and (not admit-erp)
-                        lemma-name
-                        (symbolp lemma-name)
-                        (consp (acl2::getpropc lemma-name 'acl2::theorem nil (w state)))))
-       ((when (not in-world-p)) (value (list nil :unavailable :unavailable)))
-       ((mv retry-erp & state)
-        (acl2::trans-eval `(with-output :gag-mode t ,prop-form) ctx state t))
-       (retry-top  (acl2::checkpoint-info-list t   state))
-       (retry-sub  (acl2::checkpoint-info-list nil state))
-       ; Robust success check: verify prop-form's theorem landed in the world.
-       ; A HARD ACL2 ERROR (e.g., call-depth limit from a looping rewrite rule)
-       ; bypasses retry-erp and leaves no checkpoints, so retry-erp=nil and
-       ; retry-sub=nil — indistinguishable from success without this world check.
-       (prop-name     (and (consp prop-form) (consp (cdr prop-form)) (cadr prop-form)))
-       (prop-proved-p (and (not retry-erp)
-                           prop-name
-                           (symbolp prop-name)
-                           (consp (acl2::getpropc prop-name 'acl2::theorem nil (w state)))))
-       (val-ok        (and prop-proved-p
-                           (or (eq retry-sub :unavailable) (null retry-sub)))))
-    (value (list val-ok retry-top retry-sub))))
+       ; Convert to defthm so output suppression works (property re-enables 'comment).
+       (defthm-form (property-form-to-defthm prop-form state))
+       (target-form (or defthm-form prop-form))
+       ; The theorem name we'll check in the world after the attempt.
+       ; Use defthm-form's name if conversion succeeded; otherwise prop-form's name.
+       (thm-name    (and (consp target-form) (consp (cdr target-form))
+                         (symbolp (cadr target-form)) (cadr target-form)))
+       ; Build the suppressed form, optionally wrapped with a time limit.
+       (inner-form  `(with-output :off :all :gag-mode t ,target-form))
+       (eval-form   (if time-limit
+                        `(with-prover-time-limit ,time-limit ,inner-form)
+                      inner-form))
+       ; Measure wall time for timeout classification.
+       ; read-run-time returns a rational; keep elapsed as rational for comparison
+       ; (ACL2's >= guard requires rationalp; float literals like 0.85 violate it).
+       ((mv t0 state) (acl2::read-run-time state))
+       ((mv & & state) (acl2::trans-eval eval-form ctx state t))
+       ((mv t1 state) (acl2::read-run-time state))
+       (elapsed (- t1 t0))   ; rational; convert to float only for display (not here)
+       (chk-list (acl2::checkpoint-list-pretty nil state))
+       ; World check: the theorem is in the world iff the proof succeeded.
+       ; erp from trans-eval is NOT reliable when :off :all suppresses errors.
+       (in-world-p (and thm-name
+                        (consp (acl2::getpropc thm-name 'acl2::theorem nil (w state)))))
+       ; 85/100 = 17/20 — exact rational equivalent of 0.85, avoids float guard.
+       (result (if in-world-p
+                   :proved
+                 (if (and time-limit (>= elapsed (* time-limit 85/100)))
+                     :timeout
+                   :failed))))
+    (mv result chk-list state)))
 
-; ai-try-one-candidate: run cgen + validation for a single candidate form.
-; Returns (mv raw-form cts-found val-ok retry-top retry-sub state).
-; No cw output; caller is responsible for candidate header.
-(defun ai-try-one-candidate (raw-form prop-form ctx summary-p state)
+; ai-try-with-context: re-admit all proven lemmas, then probe target.
+; Everything runs inside revert-world so the world is always clean on return.
+; Returns (mv result chk-list state).
+(defun ai-try-with-context (proven target time-limit ctx state)
   (declare (xargs :mode :program :stobjs (state)))
   (b* (
-       ; cgen plausibility check — prints freely, inside revert-world
-       ((mv cts-found & state)
-        (if summary-p
-            (revert-world (test?-fn1 raw-form nil nil state))
-          (mv nil nil state)))
-       ; counterexample found: no point validating
-       ((when cts-found) (mv raw-form t nil :unavailable :unavailable state))
-       ; validation — prints freely, inside revert-world
-       ((mv & val-result state)
-        (revert-world (ai-validate-silent raw-form prop-form ctx state)))
-       (val-ok         (car   val-result))
-       (retry-top-info (cadr  val-result))
-       (retry-sub-info (caddr val-result)))
-    (mv raw-form nil val-ok retry-top-info retry-sub-info state)))
+       ((mv & res-list state)
+        (revert-world
+          (b* (
+               ; Re-admit proven lemmas so prover can use them as rewrite rules.
+               ; Ignore readmit errors (indicate a logic bug, not a proof failure).
+               ((mv & state) (ai-readmit-all proven ctx state))
+               ((mv result chk-list state)
+                (ai-try-proof-timed target time-limit ctx state)))
+            (value (list result chk-list))))))
+    (mv (car res-list) (cadr res-list) state)))
 
-; ai-property-fn: top-level AI pipeline.
-; Called by ai-property when both the global flag and :ai t are active.
-; Runs all trans-eval operations first (ACL2s prints freely), then prints
-; the complete AI summary block at the end as one clean readable section.
+; ai-proof-loop: the recursive proof-search engine.
+;
+; Arguments:
+;   goals       -- forms still to prove; orig always sits at the end
+;   proven      -- forms already proved, in proof order (first proved first)
+;   step-ctr    -- # suggestions introduced in the current search (consumed on push)
+;   search-ctr  -- # of distinct searches attempted (starts at 1)
+;   orig        -- the original property form (never popped from goals)
+;   defs-str    -- definitions string for AI prompt (computed once)
+;   best-proven -- best proven list seen across all searches (for summary on failure)
+;   step-limit  -- max suggestions per search before resetting
+;   search-limit -- max searches before giving up
+;   time-limit  -- seconds per proof attempt (nil = no limit)
+;   verbose     -- pass to query-ai
+;   ctx         -- trans-eval context symbol
+;   state       -- ACL2 state
+;
+; Returns (mv outcome proved-seq state) where:
+;   outcome = :proved | :exhausted | :ai-error | :no-checkpoint
+;   proved-seq = list of forms proved (in proof order, for summary display)
+(defun ai-proof-loop (goals proven step-ctr search-ctr
+                      orig defs-str best-proven init-chk-list
+                      step-limit search-limit time-limit
+                      verbose ctx state)
+  (declare (xargs :mode :program :stobjs (state)))
+  (if (endp goals)
+      ; Base case: all goals proved.
+      (mv :proved proven state)
+    (b* (
+         (top     (car goals))
+         (is-orig (equal top orig))
+
+         ; Skip the proof attempt when proven is empty and we're checking orig —
+         ; Phase 1 already showed it fails without any lemma context.
+         (skip-p (and is-orig (null proven)))
+
+         ; Print what we're about to attempt (omit when skipping).
+         (- (cond (skip-p nil)
+                  (is-orig (cw "~%Proving ~x0 with context... " (cadr orig)))
+                  (t (cw "Proving suggested lemma --- "))))
+
+         ; Attempt the proof, or skip it and reuse Phase 1 checkpoints.
+         ((mv result chk-list state)
+          (if skip-p
+              (mv :failed init-chk-list state)
+            (ai-try-with-context proven top time-limit ctx state)))
+
+         ; Print result on the same line (omit when skipping).
+         (result-str (if (eq result :proved)
+                         (if is-orig "[SUCCEEDED]" "[*]")
+                       (if (eq result :timeout) "[TIMEOUT]" "[FAILED]")))
+         (- (if skip-p nil (cw "~s0~%" result-str)))
+
+         ; Case 1: proved — update proven and continue.
+         ((when (eq result :proved))
+          (ai-proof-loop (cdr goals) (append proven (list top)) step-ctr search-ctr
+                         orig defs-str best-proven init-chk-list
+                         step-limit search-limit time-limit verbose ctx state))
+
+         ; Case 2: failed/timeout on an intermediate (non-orig) lemma — discard it.
+         ; step-ctr is NOT decremented (the step was consumed when the suggestion was pushed).
+         ((when (not is-orig))
+          (ai-proof-loop (cdr goals) proven step-ctr search-ctr
+                         orig defs-str best-proven init-chk-list
+                         step-limit search-limit time-limit verbose ctx state))
+
+         ; Case 3: failed/timeout on orig — need to query AI or reset the search.
+         ((when (>= step-ctr step-limit))
+          ; Step limit reached for this search.
+          (if (>= search-ctr search-limit)
+              ; Also at search limit — give up.
+              (mv :exhausted
+                  (if (>= (len proven) (len best-proven)) proven best-proven)
+                  state)
+            ; Start a fresh search.
+            (b* ((new-best (if (>= (len proven) (len best-proven)) proven best-proven))
+                 (new-srch (1+ search-ctr))
+                 (- (cw "~%[Search ~x0 exhausted ~x1 steps. Starting search ~x2.]~%"
+                        search-ctr step-ctr new-srch)))
+              (ai-proof-loop (list orig) nil 0 new-srch
+                             orig defs-str new-best init-chk-list
+                             step-limit search-limit time-limit verbose ctx state))))
+
+         ; Query AI for a suggestion.
+         (chk-str (and (consp chk-list)
+                       (acl2s-fms-to-string "~x0" (list (cons #\0 (car chk-list))))))
+         ((when (not chk-str))
+          (prog2$ (cw "~%AI query skipped: no checkpoint available.~%")
+                  (mv :no-checkpoint proven state)))
+
+         (thm-str    (acl2s-fms-to-string "~x0" (list (cons #\0 orig))))
+         (proven-str (format-proven-str proven))
+         ; Vary seed per search so different searches produce different suggestions.
+         ; Use a base that won't overflow uint32 when search-ctr is small.
+         ; #xffffffff + 1 = 2^32, which overflows. Instead, multiply to spread seeds.
+         (seed       (+ 1234567890 (* search-ctr 100003)))
+         (new-step   (1+ step-ctr))
+
+         ((mv ai-erp suggestion)
+          (ai-call-model defs-str thm-str chk-str proven-str seed verbose))
+
+         ((when ai-erp)
+          (prog2$ (cw "~%AI query failed: ~s0~%" ai-erp)
+                  (mv :ai-error proven state)))
+
+         ; Print suggestion header and syntax check lines.
+         (- (cw "~%[Search ~x0, Step ~x1] Suggested lemma for ~x2:~% -- ~x3~%~%"
+                search-ctr new-step (cadr orig) suggestion))
+         (- (%check-line "Parse check --------------- " t))
+         (- (%check-line "Property form check ------- " t)))
+
+      ; Push suggestion as new sub-goal and recurse.
+      (ai-proof-loop (cons suggestion goals) proven new-step search-ctr
+                     orig defs-str best-proven init-chk-list
+                     step-limit search-limit time-limit verbose ctx state))))
+
+; ai-property-fn: top-level AI proof-search orchestrator.
+; ai-auto-fn: top-level AI proof-search orchestrator.
+; Called directly by the `auto` macro.
+; Phase 1: initial proof attempt (ACL2s prints freely).
+; Phase 2: ai-proof-loop — recursive search with goals/proven lists.
+; Phase 3: structured summary (checkpoints always shown).
 ; Always returns (value '(value-triple :invisible)) — purely advisory, world unchanged.
-(defun ai-property-fn (name vars body stripped-args state)
+(defun ai-auto-fn (form time-limit step-limit search-limit verbose state)
   (declare (xargs :mode :program :stobjs (state)))
   (b* (
-       (prop-form (list* 'property name vars body stripped-args))
-       (ctx       'ai-property)
-       (summary-p (ai-summary-enabled-p state))
-       ; Step 1: initial proof — no suppression, ACL2s prints freely
-       ((mv failed-p chk-list state) (ai-try-proof prop-form ctx nil state))
-       ; proof succeeded without AI; world is clean (revert-world in ai-try-proof)
+       (ctx  'auto)
+       ; Event name for display: (cadr form) works for property, defthm, definec, etc.
+       (name (and (consp form) (consp (cdr form)) (cadr form)))
+
+       ; Capture start time.
+       ((mv start-time state) (acl2::read-run-time state))
+
+       ; Phase 1: initial proof — ACL2s prints freely.
+       ; Capture chk-list from Phase 1 to seed the loop without a redundant re-probe.
+       ((mv failed-p init-chk-list state) (ai-try-proof form ctx nil state))
        ((when (not failed-p)) (value '(value-triple :invisible)))
-       ; Capture initial checkpoint info NOW — gag-state-saved is overwritten by Step 6
+
+       ; Capture initial checkpoint info for the summary display (always shown).
        (init-top-info (acl2::checkpoint-info-list t   state))
        (init-sub-info (acl2::checkpoint-info-list nil state))
-       ; Step 2: stringify the first checkpoint for the model prompt
-       (chk-str (and (consp chk-list)
-                     (acl2s-fms-to-string "~x0" (list (cons #\0 (car chk-list))))))
-       ; Step 3: collect defs and stringify theorem for the prompt
-       (defs-str (collect-defs-string body state))
-       (thm-str  (acl2s-fms-to-string "~x0" (list (cons #\0 prop-form))))
-       ; Step 4: query model — returns a single (property ...) form
-       ((mv ai-erp raw-form) (if chk-str
-                                 (ai-call-model defs-str thm-str chk-str)
-                               (mv "no checkpoint available" nil)))
-       ; Steps 5-6: cgen plausibility check + validation
-       ((mv & cts-found val-ok retry-top-info retry-sub-info state)
-        (if ai-erp
-            (mv nil nil nil :unavailable :unavailable state)
-          (ai-try-one-candidate raw-form prop-form ctx summary-p state)))
-       ; Step 7: print entire AI summary block after all proof output
-       (- (cw "~%"))
-       (- (cw? summary-p "**Summary of AI Assistance**~%"))
-       (- (cw? summary-p "Proof of ~x0 failed.~%" name))
-       (- (and summary-p (print-checkpoints init-top-info init-sub-info state)))
-       (- (if ai-erp
-              (cw "AI query failed: ~s0~%" ai-erp)
-            (cw "Suggested lemma:~% -- ~x0~%" raw-form)))
-       (- (and summary-p (not ai-erp) raw-form
-               (cw "Plausibility check (cgen): ~s0~%"
-                   (if cts-found
-                       "Counterexample found -- lemma may be wrong."
-                     "No counterexample found -- lemma looks plausible."))))
-       (- (and (not ai-erp) raw-form
-               (if val-ok
-                   (cw "Validation: Proof closes with suggested lemma!~%To use: first prove the lemma, then re-submit:~% -- ~x0~%" raw-form)
-                 (cw "Validation: Proof still fails with suggested lemma.~%"))))
-       (- (and (not ai-erp) raw-form (not val-ok) summary-p
-               (print-checkpoints retry-top-info retry-sub-info state))))
-    ; Proof failed — do not re-submit prop-form via make-event.
-    ; Returning :invisible lets make-event succeed silently; the property is
-    ; not in the world (correct: it wasn't proved). The user follows the AI
-    ; instructions to prove the suggested lemma, then re-submits.
+
+       ; Collect definitions for the AI prompt (computed once).
+       ; form-proof-body extracts the formula/body expression relevant for scanning.
+       (defs-str (collect-defs-string (form-proof-body form) state))
+
+       ; Phase 2: AI-guided proof search.
+       ; Entry: goals = [form], proven = [], step-ctr = 0, search-ctr = 1.
+       ; The loop first re-probes form (suppressed) to get fresh checkpoints,
+       ; then queries the AI and recurses.
+       ((mv outcome proved-seq state)
+        (ai-proof-loop (list form) nil 0 1
+                       form defs-str nil init-chk-list
+                       step-limit search-limit time-limit
+                       verbose ctx state))
+
+       ; Phase 3: summary.
+       ((mv end-time state) (acl2::read-run-time state))
+       (elapsed  (* (- end-time start-time) 1.0))
+       (proved-p (eq outcome :proved))
+
+       (- (cw "~%**Summary of AI Assistance**~%"))
+       (- (cw "Proof of ~x0 — ~s1~%~%"
+              name (if proved-p "PROVED WITH AI ASSISTANCE" "STILL OPEN")))
+       ; Always show initial checkpoints (merged flag — no separate summary toggle).
+       (- (print-checkpoints init-top-info init-sub-info state))
+
+       ; proved-seq when :proved includes the original form as the last element.
+       ; Separate helpers (all-but-last) from the final theorem for display.
+       (helpers (if proved-p (butlast proved-seq 1) proved-seq))
+
+       (- (if proved-p
+              (b* (
+                   (- (cw "~%Helper lemma(s) proved: ~x0~%" (len helpers)))
+                   (- (cw "~%Proof sequence (submit in this order):~%"))
+                   (- (print-proof-sequence proved-seq)))
+                nil)
+            (if proved-seq
+                (b* (
+                     (- (cw "~%Best progress: ~x0 helper lemma(s) proved before limit.~%"
+                             (len proved-seq)))
+                     (- (print-proof-sequence proved-seq)))
+                  nil)
+              (cw "~%No lemmas were successfully proved.~%"))))
+
+       (- (if proved-p
+              (cw "~%Proof complete with AI assistance.~%")
+            (cw "~%Could not close the proof within ~x0 search(es), ~x1 step(s) each.~%"
+                search-limit step-limit)))
+
+       (- (cw "~%Total time: ~f0 seconds~%" elapsed)))
     (value '(value-triple :invisible))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;; Section 7: ai-property Macro
+;;;; Section 7: auto Macro
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-; ai-property behaves exactly like property unless:
-;   (a) :ai t is present in the form, AND
-;   (b) (set-ai-automation t) has been called in the session.
+; (auto <form> :time 30 :step 5 :search 5)
 ;
-; The :ai keyword is stripped before forwarding to property.
-; Double opt-in: :ai t in code is harmless when the global is off.
-(defmacro ai-property (name vars body &rest kwd-args)
-  (b* (
-       ; extract the :ai keyword value (t or nil/absent)
-       (ai-flag    (cadr (acl2::assoc-keyword :ai kwd-args)))
-       ; strip :ai from the keyword list before forwarding to property
-       (clean-args (acl2::remove-keyword :ai kwd-args))
-       )
-    (if (not ai-flag)
-        ;; Fast path: :ai nil or absent -> plain property, zero overhead.
-        `(property ,name ,vars ,body ,@clean-args)
-      ;; :ai t -> check global flag at runtime inside make-event.
-      `(make-event
-         (if (ai-automation-enabled-p state)
-             ;; Global on + :ai t -> full pipeline.
-             (ai-property-fn ',name ',vars ',body ',clean-args state)
-           ;; Global off -> plain property.
-           (value '(property ,name ,vars ,body ,@clean-args)))))))
+; <form>    -- any ACL2 event (property, defthm, definec, ...)
+; :time N   -- seconds per proof attempt (default 30)
+; :step N   -- max AI suggestions per search (default 5)
+; :search N -- max distinct searches (default 5)
+; :verbose t -- (debug) print model prompt and raw output
+;
+; Using (auto ...) always invokes the AI proof-search pipeline.
+; No global flag needed — just use the macro.
+(defmacro auto (form &rest kwd-args)
+  (b* ((time-limit   (or (cadr (acl2::assoc-keyword :time    kwd-args)) 30))
+       (step-limit   (or (cadr (acl2::assoc-keyword :step    kwd-args)) 5))
+       (search-limit (or (cadr (acl2::assoc-keyword :search  kwd-args)) 5))
+       (verbose      (cadr (acl2::assoc-keyword :verbose kwd-args))))
+    `(with-output :off summary
+       (make-event
+         (ai-auto-fn ',form ,time-limit ,step-limit ,search-limit ',verbose state)))))

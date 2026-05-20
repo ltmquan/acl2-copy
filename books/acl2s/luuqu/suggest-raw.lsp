@@ -9,9 +9,16 @@
 
 (in-package "ACL2S")
 
-;;; -- 1. Load Quicklisp -------------------------------------------------
+;;; -- 1. Load dependencies via Quicklisp, then load cl-llama from luuqu --
+;;; CFFI and cffi-libffi are the only external dependencies of cl-llama.
+;;; The cl-llama source files themselves live in cl-llama/ next to this file.
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
-(ql:quickload :cl-llama :silent t)
+(ql:quickload '(:cffi :cffi-libffi) :silent t)
+(let* ((here (make-pathname :name nil :type nil :defaults *load-truename*))
+       (cl-llama-dir (merge-pathnames "cl-llama/" here)))
+  (dolist (f '("package.lisp" "library.lisp" "bindings.lisp"
+               "high-level.lisp" "suggest.lisp"))
+    (load (merge-pathnames f cl-llama-dir))))
 
 ;;; -- 2. Load the model immediately ------------------------------------
 ;;; Use merge-pathnames + namestring so the C library gets an absolute path.
@@ -32,18 +39,23 @@
 
 ;;; -- 4. query-ai-raw --------------------------------------------------
 ;;;
-;;; Inputs:  defs       string -- pretty-printed user function definitions
-;;;          theorem    string -- the full (property ...) form as a string
-;;;          checkpoint string -- first failed subgoal from checkpoint-list-pretty
+;;; Inputs:  defs          string -- pretty-printed user function definitions
+;;;          theorem       string -- the full (property ...) form as a string
+;;;          checkpoint    string -- first failed subgoal from checkpoint-list-pretty
+;;;          proven-lemmas string -- newline-separated proven helper forms (or nil/"")
+;;;          seed          integer -- random seed; vary per search for non-determinism
 ;;;
 ;;; Returns: (values erp form)   [standard CL multiple values]
 ;;;   erp  = nil    -> form is a parsed Lisp s-expression
 ;;;   erp  = string -> parse/model error; form is nil
 
-(defun query-ai-raw (defs theorem checkpoint)
+(defun query-ai-raw (defs theorem checkpoint proven-lemmas seed &key verbose)
   (handler-case
     (let* (;; Call the model for a single candidate string.
-           (raw (cl-llama:suggest-lemma defs theorem checkpoint))
+           ;; proven-lemmas is a string of already-proved forms (or nil/empty).
+           ;; seed varies per search so different searches get different suggestions.
+           (raw (cl-llama:suggest-lemma defs theorem checkpoint proven-lemmas
+                                        :seed seed :verbose verbose))
            ;; Trim whitespace.
            (trimmed (string-trim '(#\Space #\Newline #\Tab #\Return) raw))
            ;; Find the start of the (property ...) form.
