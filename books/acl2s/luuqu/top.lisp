@@ -503,13 +503,41 @@
                      orig defs-str best-proven init-chk-list
                      step-limit search-limit time-limit verbose ctx state))))
 
-; ai-property-fn: top-level AI proof-search orchestrator.
+; map-property-to-local: convert a list of helper forms to (local (defthm ...))
+; forms for use inside an encapsulate. property-form-to-defthm is applied first
+; to avoid the 'comment channel leak that bypasses :off :all.
+(defun map-property-to-local (forms state)
+  (declare (xargs :mode :program :stobjs (state)))
+  (if (endp forms)
+      nil
+    (b* ((f (car forms))
+         (d (property-form-to-defthm f state)))
+      (cons `(local ,(or d f))
+            (map-property-to-local (cdr forms) state)))))
+
+; make-encapsulate-form: wrap proved-seq as a silent encapsulate where helpers
+; are local (invisible after encapsulate closes) and only the final theorem is
+; exported to the world. proved-seq is in proof order: helpers first, theorem last.
+(defun make-encapsulate-form (proved-seq state)
+  (declare (xargs :mode :program :stobjs (state)))
+  (b* ((helpers     (butlast proved-seq 1))
+       (final       (car (last proved-seq)))
+       (final-d     (property-form-to-defthm final state))
+       (local-forms (map-property-to-local helpers state)))
+    `(with-output :off :all :gag-mode t
+       (encapsulate ()
+         ,@local-forms
+         ,(or final-d final)))))
+
 ; ai-auto-fn: top-level AI proof-search orchestrator.
 ; Called directly by the `auto` macro.
 ; Phase 1: initial proof attempt (ACL2s prints freely).
 ; Phase 2: ai-proof-loop — recursive search with goals/proven lists.
 ; Phase 3: structured summary (checkpoints always shown).
-; Always returns (value '(value-triple :invisible)) — purely advisory, world unchanged.
+; On success (Phase 1): silently re-admits the form so make-event lands it in the world.
+; On success (AI path): returns a silent encapsulate — helpers are local, only
+; the final theorem is exported to the world.
+; On failure: returns (value-triple :invisible) — world unchanged.
 (defun ai-auto-fn (form time-limit step-limit search-limit verbose state)
   (declare (xargs :mode :program :stobjs (state)))
   (b* (
@@ -523,7 +551,12 @@
        ; Phase 1: initial proof — ACL2s prints freely.
        ; Capture chk-list from Phase 1 to seed the loop without a redundant re-probe.
        ((mv failed-p init-chk-list state) (ai-try-proof form ctx nil state))
-       ((when (not failed-p)) (value '(value-triple :invisible)))
+       ; Phase 1 succeeded — silently re-admit via make-event so the theorem
+       ; lands in the world. property-form-to-defthm avoids the 'comment leak.
+       ((when (not failed-p))
+        (b* ((defthm-form (property-form-to-defthm form state))
+             (admit-form  (or defthm-form form)))
+          (value `(with-output :off :all :gag-mode t ,admit-form))))
 
        ; Capture initial checkpoint info for the summary display (always shown).
        (init-top-info (acl2::checkpoint-info-list t   state))
@@ -560,9 +593,11 @@
 
        (- (if proved-p
               (b* (
-                   (- (cw "~%Helper lemma(s) proved: ~x0~%" (len helpers)))
-                   (- (cw "~%Proof sequence (submit in this order):~%"))
-                   (- (print-proof-sequence proved-seq)))
+                   (- (if helpers
+                          (cw "~%Helper lemma(s): ~x0 (local, not exported to world)~%"
+                              (len helpers))
+                        (cw "~%No helper lemmas needed.~%")))
+                   (- (cw "~%Theorem admitted to world: ~x0~%" name)))
                 nil)
             (if proved-seq
                 (b* (
@@ -578,7 +613,12 @@
                 search-limit step-limit)))
 
        (- (cw "~%Total time: ~f0 seconds~%" elapsed)))
-    (value '(value-triple :invisible))))
+    ; AI path: if proved, admit via encapsulate — helpers are local (not exported),
+    ; only the final theorem lands in the world.
+    ; On failure, return :invisible — world stays clean (revert-world cleaned up).
+    (if proved-p
+        (value (make-encapsulate-form proved-seq state))
+      (value '(value-triple :invisible)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;; Section 7: auto Macro
