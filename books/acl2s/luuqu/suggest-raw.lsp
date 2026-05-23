@@ -27,7 +27,8 @@
  (namestring (merge-pathnames
               "Documents/ai-models/Ministral-3-14B-Instruct-2512-Q4_K_M.gguf"
               (user-homedir-pathname)))
- :n-gpu-layers -1)
+ :n-gpu-layers -1
+ :n-ctx 16384)
 
 ;;; -- 3. Register shutdown hook -----------------------------------------
 ;;; cl-llama:shutdown frees context, model, then calls %llama-backend-free.
@@ -43,19 +44,24 @@
 ;;;          theorem       string -- the full (property ...) form as a string
 ;;;          checkpoint    string -- first failed subgoal from checkpoint-list-pretty
 ;;;          proven-lemmas string -- newline-separated proven helper forms (or nil/"")
-;;;          seed          integer -- random seed; vary per search for non-determinism
+;;;          failed-str    string -- newline-separated forms ACL2s could not prove (or nil/"")
+;;;          seed          integer -- random seed; varies per search for non-determinism
+;;;          temperature   rational -- sampling temperature; converted to single-float here
 ;;;
 ;;; Returns: (values erp form)   [standard CL multiple values]
 ;;;   erp  = nil    -> form is a parsed Lisp s-expression
 ;;;   erp  = string -> parse/model error; form is nil
 
-(defun query-ai-raw (defs theorem checkpoint proven-lemmas seed &key verbose)
+(defun query-ai-raw (defs theorem checkpoint proven-lemmas failed-str seed temperature &key verbose)
   (handler-case
     (let* (;; Call the model for a single candidate string.
-           ;; proven-lemmas is a string of already-proved forms (or nil/empty).
-           ;; seed varies per search so different searches get different suggestions.
+           ;; proven-lemmas and failed-str are formatted the same way (format-proven-str).
+           ;; seed and temperature vary per search for diverse suggestions.
+           ;; temperature arrives as a rational from ACL2; coerce to single-float for llama.
            (raw (cl-llama:suggest-lemma defs theorem checkpoint proven-lemmas
-                                        :seed seed :verbose verbose))
+                                        :seed seed :verbose verbose
+                                        :temperature (coerce temperature 'single-float)
+                                        :failed-lemmas failed-str))
            ;; Trim whitespace.
            (trimmed (string-trim '(#\Space #\Newline #\Tab #\Return) raw))
            ;; Find the start of the (property ...) form.

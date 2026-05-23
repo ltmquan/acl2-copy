@@ -1,10 +1,12 @@
 (in-package :cl-llama)
 
 (defun suggest-lemma (definitions theorem checkpoint proven-lemmas
-                      &key (max-tokens 300) (temperature 0.15f0) (seed #xffffffff) verbose)
+                      &key (max-tokens 300) (temperature 0.15f0) (seed #xffffffff)
+                           verbose failed-lemmas)
   "Query the loaded model for a lemma suggestion given an ACL2s proof failure.
    DEFINITIONS, THEOREM, CHECKPOINT are plain strings from the proof context.
    PROVEN-LEMMAS is a string listing already-proved helper lemmas (or nil/\"\").
+   FAILED-LEMMAS is a string listing lemmas ACL2s could not prove (or nil/\"\").
    Returns the model's output string (the suggested lemma form).
    When VERBOSE is true, prints the prompt and raw output to stdout.
 
@@ -14,6 +16,10 @@
   (let* ((proven-section
           (if (and proven-lemmas (not (equal proven-lemmas "")))
               (format nil "~%Proven lemmas (available as rewrite rules):~%~A" proven-lemmas)
+            ""))
+         (failed-section
+          (if (and failed-lemmas (not (equal failed-lemmas "")))
+              (format nil "~%Do not suggest the following (ACL2s could not prove them):~%~A" failed-lemmas)
             ""))
          (original-prompt (format nil
 "You are an ACL2s assistant helping to prove theorems. A proof has failed.
@@ -25,7 +31,7 @@ Theorem being proved:
 ~A
 
 Failed subgoal:
-~A~A
+~A~A~A
 
 Suggest ONE helper lemma using the ACL2s property form. Your response MUST start with \"(property\" and use this exact syntax:
 
@@ -37,7 +43,7 @@ Example:
 
 Return ONLY the (property ...) form. No explanation, no commentary, no markdown, no backticks, no quotes. Start your response with \"(property\".
 
-" definitions theorem checkpoint proven-section))
+" definitions theorem checkpoint proven-section failed-section))
          (current-prompt original-prompt)
          (last-result nil))
     ;; Up to 3 attempts total. Return on first syntactically valid output;

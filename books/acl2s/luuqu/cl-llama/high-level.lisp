@@ -24,6 +24,8 @@ llama_memory_seq_cp fails (is_full=nil assertion). Keeping KV on CPU enables
 seq_cp, which beam search requires. GPU compute (attention) still runs on Metal."
   (%cl-llama-context-default-params-into ptr)
   (setf (foreign-slot-value ptr '(:struct llama-context-params) 'n-ctx)       n-ctx
+        (foreign-slot-value ptr '(:struct llama-context-params) 'n-batch)     n-ctx
+        (foreign-slot-value ptr '(:struct llama-context-params) 'n-ubatch)    n-ctx
         (foreign-slot-value ptr '(:struct llama-context-params) 'n-seq-max)   n-seq-max
         (foreign-slot-value ptr '(:struct llama-context-params) 'offload-kqv) nil))
 
@@ -140,7 +142,7 @@ seq_cp, which beam search requires. GPU compute (attention) still runs on Metal.
              ;; Clear the KV cache from any previous generate call before decoding.
              ;; Without this, the second call fails: the cache still holds tokens
              ;; from the prior inference and decode returns non-zero on the new prompt.
-             (%llama-memory-seq-rm (%llama-get-memory *current-context*) 0 -1 -1)
+             (%llama-memory-seq-rm (%llama-get-memory *current-context*) -1 -1 -1)
              ;; Decode prompt
              (with-foreign-object (tok-buf 'llama-token n-prompt)
                (loop for i below n-prompt

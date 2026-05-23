@@ -42,11 +42,11 @@
 ; NOTE: defun-bridge auto-generates (declare (xargs :mode :program)); adding
 ; a second xargs via :program-declare causes ACL2 to reject. State is omitted
 ; since query-ai-raw ignores it, eliminating the stobjs-declare problem.
-(acl2::defun-bridge query-ai (defs theorem checkpoint proven-lemmas seed verbose)
+(acl2::defun-bridge query-ai (defs theorem checkpoint proven-lemmas failed-str seed temperature verbose)
   :program (mv "raw Lisp not loaded" nil)
-  :raw (query-ai-raw defs theorem checkpoint proven-lemmas seed :verbose verbose))
+  :raw (query-ai-raw defs theorem checkpoint proven-lemmas failed-str seed temperature :verbose verbose))
 
-; Section 4 removed — no global automation flag.
+; Section 4 removed -- no global automation flag.
 ; Use (auto <form>) to invoke AI proof search directly.
 
 
@@ -150,8 +150,8 @@
 ; Background: ACL2s's property macro always re-enables the 'comment output channel
 ; inside its generated with-output forms (via :on (comment summary)).  This makes
 ; it impossible to suppress property's cw output via any outer with-output wrapper.
-; By converting to a plain defthm — which uses the standard ACL2 event machinery
-; and respects inhibit-output-lst — we can suppress all output inside trans-eval.
+; By converting to a plain defthm -- which uses the standard ACL2 event machinery
+; and respects inhibit-output-lst -- we can suppress all output inside trans-eval.
 ;
 ; Returns the defthm form on success, nil if the form doesn't have the expected
 ; (property name vars body) structure (e.g., complex multi-clause bodies).
@@ -288,12 +288,14 @@
 
 ; ai-call-model: call the AI and shape-check the result.
 ; proven-str is a newline-separated string of already-proved property forms (or "").
-; seed varies per search to get non-deterministic variation across searches.
+; failed-str is a newline-separated string of forms ACL2s could not prove (or "").
+; seed and temperature both vary per search to produce diverse suggestions.
+; temperature is a rational (e.g. 3/20); query-ai-raw converts it to single-float.
 ; Returns (mv erp raw-form) where raw-form is a (property ...) form on success.
-(defun ai-call-model (defs-str thm-str chk-str proven-str seed verbose)
+(defun ai-call-model (defs-str thm-str chk-str proven-str failed-str seed temperature verbose)
   (declare (xargs :mode :program))
   (b* (
-       ((mv ai-erp raw-form) (query-ai defs-str thm-str chk-str proven-str seed verbose))
+       ((mv ai-erp raw-form) (query-ai defs-str thm-str chk-str proven-str failed-str seed temperature verbose))
        ((when ai-erp) (mv ai-erp nil))
        ((when (not (and (consp raw-form) (eq (car raw-form) 'property))))
         (mv (acl2s-fms-to-string
@@ -331,10 +333,10 @@
 ;
 ; WARNING: (with-output :off :all ...) suppresses proof-failure errors, making
 ; erp unreliable as a success indicator (erp=nil even on failure).
-; We therefore use the world check — if the theorem name landed in the world,
+; We therefore use the world check -- if the theorem name landed in the world,
 ; the proof succeeded. This matches the pattern from the old ai-validate-steps.
 ;
-; Does NOT use revert-world — caller is responsible for world management.
+; Does NOT use revert-world -- caller is responsible for world management.
 (defun ai-try-proof-timed (prop-form time-limit ctx state)
   (declare (xargs :mode :program :stobjs (state)))
   (b* (
@@ -362,7 +364,7 @@
        ; erp from trans-eval is NOT reliable when :off :all suppresses errors.
        (in-world-p (and thm-name
                         (consp (acl2::getpropc thm-name 'acl2::theorem nil (w state)))))
-       ; 85/100 = 17/20 — exact rational equivalent of 0.85, avoids float guard.
+       ; 85/100 = 17/20 -- exact rational equivalent of 0.85, avoids float guard.
        (result (if in-world-p
                    :proved
                  (if (and time-limit (>= elapsed (* time-limit 85/100)))
@@ -387,121 +389,225 @@
             (value (list result chk-list))))))
     (mv (car res-list) (cadr res-list) state)))
 
-; ai-proof-loop: the recursive proof-search engine.
+; print-search-tree / print-search-tree-children: display the search tree
+; built during ai-search-node / ai-search-children for the final summary.
 ;
-; Arguments:
-;   goals       -- forms still to prove; orig always sits at the end
-;   proven      -- forms already proved, in proof order (first proved first)
-;   step-ctr    -- # suggestions introduced in the current search (consumed on push)
-;   search-ctr  -- # of distinct searches attempted (starts at 1)
-;   orig        -- the original property form (never popped from goals)
-;   defs-str    -- definitions string for AI prompt (computed once)
-;   best-proven -- best proven list seen across all searches (for summary on failure)
-;   step-limit  -- max suggestions per search before resetting
-;   search-limit -- max searches before giving up
-;   time-limit  -- seconds per proof attempt (nil = no limit)
-;   verbose     -- pass to query-ai
-;   ctx         -- trans-eval context symbol
-;   state       -- ACL2 state
+; Tree node format:  (list form result children)
+;   form:     the (property ...) form that was attempted
+;   result:   :proved | :failed | :timeout
+;   children: list of child entries
 ;
-; Returns (mv outcome proved-seq state) where:
-;   outcome = :proved | :exhausted | :ai-error | :no-checkpoint
-;   proved-seq = list of forms proved (in proof order, for summary display)
-(defun ai-proof-loop (goals proven step-ctr search-ctr
-                      orig defs-str best-proven init-chk-list
-                      step-limit search-limit time-limit
-                      verbose ctx state)
+; Child entry format: (list suggestion child-node retry-result)
+;   suggestion:   the helper form the AI suggested
+;   child-node:   tree node for proving the suggestion
+;   retry-result: :proved/:failed/:timeout (re-try of parent after suggestion proved)
+;                 nil when the suggestion itself failed to prove
+(mutual-recursion
+
+(defun print-search-tree (node indent)
+  ; Prints the root node at indent, then its children with |_ at indent+"  ".
+  (declare (xargs :mode :program))
+  (let* ((form     (car node))
+         (result   (cadr node))
+         (children (caddr node)))
+    (prog2$
+      (cw "~s0~x1 [~s2]~%"
+          indent (cadr form)
+          (cond ((eq result :proved)  "proved")
+                ((eq result :timeout) "timeout")
+                (t                    "failed")))
+      (print-search-tree-children children (concatenate 'string indent "  ")))))
+
+(defun print-search-tree-children (children indent)
+  ; Prints each child with |_ prefix at indent, then recurses into its children.
+  (declare (xargs :mode :program))
+  (if (endp children)
+      nil
+    (let* ((entry      (car children))
+           (child-node (cadr entry))
+           (c-form     (car child-node))
+           (c-result   (cadr child-node))
+           (c-kids     (caddr child-node)))
+      (prog2$
+        (prog2$
+          (cw "~s0|_ ~x1 [~s2]~%"
+              indent (cadr c-form)
+              (cond ((eq c-result :proved)  "proved")
+                    ((eq c-result :timeout) "timeout")
+                    (t                      "failed")))
+          (print-search-tree-children c-kids (concatenate 'string indent "  ")))
+        (print-search-tree-children (cdr children) indent)))))
+
+) ; end mutual-recursion (print-search-tree)
+
+; ai-search-node / ai-search-children: DFS tree proof search with backtracking.
+;
+; Three tracking structures:
+;   context       -- path-specific proved forms (for ai-try-with-context); reverts on backtrack
+;   proven-global -- all forms proved anywhere in the search, never shrinks; fed to AI prompt
+;   failed-global -- all suggestions that failed to prove, never shrinks; fed to AI prompt
+;
+; Tree nodes are built bottom-up for the final summary display.
+;
+; ai-search-node returns     (mv result context proven-global tree-node state)
+; ai-search-children returns (mv result context proven-global children-acc state)
+;   result: :proved or :failed
+(mutual-recursion
+
+;;; Attempt to prove FORM using CONTEXT helpers. If proof fails and depth
+;;; allows, delegate to ai-search-children to find a helper lemma.
+;;;
+;;; PATH is a string like "1", "1.2", "2.1.3" identifying this node in the
+;;; search tree. It is used solely for log output so the user can tell apart
+;;; nodes at the same depth that are in different subtrees.
+(defun ai-search-node (form context proven-global failed-global depth path
+                       step-limit search-limit time-limit verbose ctx state)
   (declare (xargs :mode :program :stobjs (state)))
-  (if (endp goals)
-      ; Base case: all goals proved.
-      (mv :proved proven state)
-    (b* (
-         (top     (car goals))
-         (is-orig (equal top orig))
+  (b* (
+    (- (cw "~%[~s0] ~x1... " path (cadr form)))
+    ((mv result chk-list state)
+     (ai-try-with-context context form time-limit ctx state))
+    (- (cw "~s0~%" (cond ((eq result :proved)  "[PROVED]")
+                         ((eq result :timeout) "[TIMEOUT]")
+                         (t                    "[FAILED]"))))
 
-         ; Skip the proof attempt when proven is empty and we're checking orig —
-         ; Phase 1 already showed it fails without any lemma context.
-         (skip-p (and is-orig (null proven)))
+    ; Proved -- extend context and proven-global; build leaf tree node.
+    ((when (eq result :proved))
+     (mv :proved
+         (append context (list form))
+         (append proven-global (list form))
+         (list form :proved nil)
+         state))
 
-         ; Print what we're about to attempt (omit when skipping).
-         (- (cond (skip-p nil)
-                  (is-orig (cw "~%Proving ~x0 with context... " (cadr orig)))
-                  (t (cw "Proving suggested lemma --- "))))
+    ; At depth limit -- cannot go deeper; build failed leaf.
+    ((when (>= depth step-limit))
+     (mv :failed context proven-global (list form :failed nil) state))
 
-         ; Attempt the proof, or skip it and reuse Phase 1 checkpoints.
-         ((mv result chk-list state)
-          (if skip-p
-              (mv :failed init-chk-list state)
-            (ai-try-with-context proven top time-limit ctx state)))
+    ; Explore AI-suggested children.
+    ((mv child-result new-context new-proven children state)
+     (ai-search-children form context proven-global failed-global depth path
+                         chk-list nil 1 nil
+                         step-limit search-limit time-limit verbose ctx state)))
+  (mv child-result new-context new-proven (list form child-result children) state)))
 
-         ; Print result on the same line (omit when skipping).
-         (result-str (if (eq result :proved)
-                         (if is-orig "[SUCCEEDED]" "[*]")
-                       (if (eq result :timeout) "[TIMEOUT]" "[FAILED]")))
-         (- (if skip-p nil (cw "~s0~%" result-str)))
+;;; Try up to SEARCH-LIMIT AI-suggested children for FORM at DEPTH.
+;;;
+;;; PARENT-PATH is the path string for FORM (the node whose children we explore).
+;;; Each child gets path PARENT-PATH + "." + CHILD-NUM (or just CHILD-NUM at root).
+;;; failed-here:  suggestions tried at this node that did not help FORM prove
+;;; child-num:    1-based current child index
+;;; children-acc: accumulated child entries for tree display
+;;;
+;;; defs-str is recomputed from FORM at each node so the AI prompt always
+;;; contains definitions relevant to the theorem currently being proved,
+;;; not just those from the original root theorem.
+(defun ai-search-children (form context proven-global failed-global depth parent-path
+                           chk-list failed-here child-num children-acc
+                           step-limit search-limit time-limit verbose ctx state)
+  (declare (xargs :mode :program :stobjs (state)))
+  (b* (
+    ; Exhausted child budget at this node.
+    ((when (> child-num search-limit))
+     (mv :failed context proven-global children-acc state))
 
-         ; Case 1: proved — update proven and continue.
-         ((when (eq result :proved))
-          (ai-proof-loop (cdr goals) (append proven (list top)) step-ctr search-ctr
-                         orig defs-str best-proven init-chk-list
+    ; Path for this child: "N" at root level, "P.N" otherwise.
+    ; explode-atom + coerce converts the integer to a plain string like "1", "12", etc.
+    ; without the trailing newline that acl2s-fms-to-string appends.
+    (child-num-str (coerce (acl2::explode-atom child-num 10) 'string))
+    (child-path    (if (equal parent-path "")
+                       child-num-str
+                     (concatenate 'string parent-path "." child-num-str)))
+
+    ; Seed and temperature vary by (depth, child-num) for diverse suggestions.
+    ; Temperature increases with depth: harder sub-goals benefit from more creativity.
+    (seed        (+ 1234567890 (* (+ (* depth (1+ search-limit)) child-num) 100003)))
+    (temperature (min 9/10 (* (1+ depth) 3/20)))
+
+    ; Recompute defs-str from FORM so the AI sees definitions relevant to the
+    ; theorem currently being proved, not just those from the root theorem.
+    (defs-str (collect-defs-string (form-proof-body form) state))
+
+    ; Build prompt strings.
+    ; AI sees proven-global (all proved anywhere in the tree) for the proven section,
+    ; and failed-global + failed-here for the "do not suggest" section.
+    (thm-str    (acl2s-fms-to-string "~x0" (list (cons #\0 form))))
+    (chk-str    (and (consp chk-list)
+                     (acl2s-fms-to-string "~x0" (list (cons #\0 (car chk-list))))))
+    ((when (not chk-str))
+     (prog2$ (cw "~%AI query skipped: no checkpoint.~%")
+             (mv :failed context proven-global children-acc state)))
+    (proven-str (format-proven-str proven-global))
+    (failed-str (format-proven-str (append failed-global failed-here)))
+
+    ; Query AI for a helper suggestion.
+    (- (cw "~%[~s0] Querying AI for helper to prove ~x1 (search ~x2/~x3)...~%"
+           child-path (cadr form) child-num search-limit))
+    ((mv ai-erp suggestion)
+     (ai-call-model defs-str thm-str chk-str proven-str failed-str
+                    seed temperature verbose))
+    ((when ai-erp)
+     (b* ((- (cw "~%AI query failed: ~s0~%" ai-erp)))
+       (ai-search-children form context proven-global failed-global depth parent-path
+                           chk-list failed-here (1+ child-num) children-acc
+                           step-limit search-limit time-limit verbose ctx state)))
+
+    (- (cw " -- ~x0~%" suggestion))
+    (- (%check-line "Parse check --------------- " t))
+    (- (%check-line "Property form check ------- " t))
+
+    ; Recursively try to prove the suggestion at depth+1.
+    ; Pass (append failed-global failed-here) so the child subtree also avoids
+    ; already-tried suggestions from this level.
+    ((mv child-result child-context child-proven child-tree state)
+     (ai-search-node suggestion context proven-global
+                     (append failed-global failed-here)
+                     (1+ depth) child-path
+                     step-limit search-limit time-limit verbose ctx state))
+
+    ; Child failed: context unchanged; proven-global may have grown from subtree.
+    ; Add suggestion to failed-here and try next sibling.
+    ((when (eq child-result :failed))
+     (ai-search-children form context child-proven failed-global depth parent-path
+                         chk-list
+                         (append failed-here (list suggestion))
+                         (1+ child-num)
+                         (append children-acc (list (list suggestion child-tree nil)))
                          step-limit search-limit time-limit verbose ctx state))
 
-         ; Case 2: failed/timeout on an intermediate (non-orig) lemma — discard it.
-         ; step-ctr is NOT decremented (the step was consumed when the suggestion was pushed).
-         ((when (not is-orig))
-          (ai-proof-loop (cdr goals) proven step-ctr search-ctr
-                         orig defs-str best-proven init-chk-list
-                         step-limit search-limit time-limit verbose ctx state))
+    ; Child proved: re-try FORM with the updated context.
+    (- (cw "~%[~s0] ~x1... "
+           (if (equal parent-path "") "root" parent-path)
+           (cadr form)))
+    ((mv retry-result retry-chk state)
+     (ai-try-with-context child-context form time-limit ctx state))
+    (- (cw "~s0~%" (cond ((eq retry-result :proved)  "[PROVED]")
+                         ((eq retry-result :timeout) "[TIMEOUT]")
+                         (t                          "[FAILED]"))))
 
-         ; Case 3: failed/timeout on orig — need to query AI or reset the search.
-         ((when (>= step-ctr step-limit))
-          ; Step limit reached for this search.
-          (if (>= search-ctr search-limit)
-              ; Also at search limit — give up.
-              (mv :exhausted
-                  (if (>= (len proven) (len best-proven)) proven best-proven)
-                  state)
-            ; Start a fresh search.
-            (b* ((new-best (if (>= (len proven) (len best-proven)) proven best-proven))
-                 (new-srch (1+ search-ctr))
-                 (- (cw "~%[Search ~x0 exhausted ~x1 steps. Starting search ~x2.]~%"
-                        search-ctr step-ctr new-srch)))
-              (ai-proof-loop (list orig) nil 0 new-srch
-                             orig defs-str new-best init-chk-list
-                             step-limit search-limit time-limit verbose ctx state))))
+    (entry (list suggestion child-tree retry-result))
 
-         ; Query AI for a suggestion.
-         (chk-str (and (consp chk-list)
-                       (acl2s-fms-to-string "~x0" (list (cons #\0 (car chk-list))))))
-         ((when (not chk-str))
-          (prog2$ (cw "~%AI query skipped: no checkpoint available.~%")
-                  (mv :no-checkpoint proven state)))
+    ; Parent proved with this helper: success.
+    ((when (eq retry-result :proved))
+     (mv :proved
+         (append child-context (list form))
+         (append child-proven  (list form))
+         (append children-acc  (list entry))
+         state))
 
-         (thm-str    (acl2s-fms-to-string "~x0" (list (cons #\0 orig))))
-         (proven-str (format-proven-str proven))
-         ; Vary seed per search so different searches produce different suggestions.
-         ; Use a base that won't overflow uint32 when search-ctr is small.
-         ; #xffffffff + 1 = 2^32, which overflows. Instead, multiply to spread seeds.
-         (seed       (+ 1234567890 (* search-ctr 100003)))
-         (new-step   (1+ step-ctr))
+    ; Parent still fails: try next child.
+    ; Keep child-context (proved helper stays in scope for next sibling).
+    ; Do NOT add suggestion to failed-here -- it proved and already lives in
+    ; proven-global (child-proven). Adding it to failed would cause it to appear
+    ; in both the proven and "do not suggest" sections of the AI prompt.
+    )
+  (ai-search-children form child-context child-proven failed-global depth parent-path
+                      retry-chk
+                      failed-here
+                      (1+ child-num)
+                      (append children-acc (list entry))
+                      step-limit search-limit time-limit verbose ctx state)))
 
-         ((mv ai-erp suggestion)
-          (ai-call-model defs-str thm-str chk-str proven-str seed verbose))
-
-         ((when ai-erp)
-          (prog2$ (cw "~%AI query failed: ~s0~%" ai-erp)
-                  (mv :ai-error proven state)))
-
-         ; Print suggestion header and syntax check lines.
-         (- (cw "~%[Search ~x0, Step ~x1] Suggested lemma for ~x2:~% -- ~x3~%~%"
-                search-ctr new-step (cadr orig) suggestion))
-         (- (%check-line "Parse check --------------- " t))
-         (- (%check-line "Property form check ------- " t)))
-
-      ; Push suggestion as new sub-goal and recurse.
-      (ai-proof-loop (cons suggestion goals) proven new-step search-ctr
-                     orig defs-str best-proven init-chk-list
-                     step-limit search-limit time-limit verbose ctx state))))
+) ; end mutual-recursion (ai-search-node)
 
 ; map-property-to-local: convert a list of helper forms to (local (defthm ...))
 ; forms for use inside an encapsulate. property-form-to-defthm is applied first
@@ -532,12 +638,12 @@
 ; ai-auto-fn: top-level AI proof-search orchestrator.
 ; Called directly by the `auto` macro.
 ; Phase 1: initial proof attempt (ACL2s prints freely).
-; Phase 2: ai-proof-loop — recursive search with goals/proven lists.
-; Phase 3: structured summary (checkpoints always shown).
+; Phase 2: ai-search-children -- DFS tree search with backtracking.
+; Phase 3: structured summary with search tree display.
 ; On success (Phase 1): silently re-admits the form so make-event lands it in the world.
-; On success (AI path): returns a silent encapsulate — helpers are local, only
+; On success (AI path): returns a silent encapsulate -- helpers are local, only
 ; the final theorem is exported to the world.
-; On failure: returns (value-triple :invisible) — world unchanged.
+; On failure: returns (value-triple :invisible) -- world unchanged.
 (defun ai-auto-fn (form time-limit step-limit search-limit verbose state)
   (declare (xargs :mode :program :stobjs (state)))
   (b* (
@@ -548,10 +654,10 @@
        ; Capture start time.
        ((mv start-time state) (acl2::read-run-time state))
 
-       ; Phase 1: initial proof — ACL2s prints freely.
+       ; Phase 1: initial proof -- ACL2s prints freely.
        ; Capture chk-list from Phase 1 to seed the loop without a redundant re-probe.
        ((mv failed-p init-chk-list state) (ai-try-proof form ctx nil state))
-       ; Phase 1 succeeded — silently re-admit via make-event so the theorem
+       ; Phase 1 succeeded -- silently re-admit via make-event so the theorem
        ; lands in the world. property-form-to-defthm avoids the 'comment leak.
        ((when (not failed-p))
         (b* ((defthm-form (property-form-to-defthm form state))
@@ -562,19 +668,16 @@
        (init-top-info (acl2::checkpoint-info-list t   state))
        (init-sub-info (acl2::checkpoint-info-list nil state))
 
-       ; Collect definitions for the AI prompt (computed once).
-       ; form-proof-body extracts the formula/body expression relevant for scanning.
-       (defs-str (collect-defs-string (form-proof-body form) state))
-
-       ; Phase 2: AI-guided proof search.
-       ; Entry: goals = [form], proven = [], step-ctr = 0, search-ctr = 1.
-       ; The loop first re-probes form (suppressed) to get fresh checkpoints,
-       ; then queries the AI and recurses.
-       ((mv outcome proved-seq state)
-        (ai-proof-loop (list form) nil 0 1
-                       form defs-str nil init-chk-list
-                       step-limit search-limit time-limit
-                       verbose ctx state))
+       ; Phase 2: AI-guided DFS tree search with backtracking.
+       ; Skip root re-probe -- Phase 1 already showed it fails with empty context.
+       ; proven-global, failed-global, context all start empty.
+       ; defs-str is computed per-node inside ai-search-children from the form being proved.
+       ((mv outcome context & children state)
+        (ai-search-children form nil nil nil 0 ""
+                            init-chk-list nil 1 nil
+                            step-limit search-limit time-limit
+                            verbose ctx state))
+       (root-tree (list form outcome children))
 
        ; Phase 3: summary.
        ((mv end-time state) (acl2::read-run-time state))
@@ -582,14 +685,27 @@
        (proved-p (eq outcome :proved))
 
        (- (cw "~%**Summary of AI Assistance**~%"))
-       (- (cw "Proof of ~x0 — ~s1~%~%"
+       (- (cw "Proof of ~x0 -- ~s1~%~%"
               name (if proved-p "PROVED WITH AI ASSISTANCE" "STILL OPEN")))
-       ; Always show initial checkpoints (merged flag — no separate summary toggle).
+       ; Always show initial checkpoints.
        (- (print-checkpoints init-top-info init-sub-info state))
 
-       ; proved-seq when :proved includes the original form as the last element.
+       ; context when :proved includes the original form as the last element.
        ; Separate helpers (all-but-last) from the final theorem for display.
-       (helpers (if proved-p (butlast proved-seq 1) proved-seq))
+       (helpers (if proved-p (butlast context 1) context))
+
+       ; Verbose only: search tree + proven lemmas in order.
+       (- (if verbose
+              (prog2$
+                (prog2$
+                  (cw "~%Search tree:~%")
+                  (print-search-tree root-tree ""))
+                (if helpers
+                    (prog2$
+                      (cw "~%Proven lemmas (in order):~%")
+                      (print-proof-sequence helpers))
+                  nil))
+            nil))
 
        (- (if proved-p
               (b* (
@@ -599,12 +715,9 @@
                         (cw "~%No helper lemmas needed.~%")))
                    (- (cw "~%Theorem admitted to world: ~x0~%" name)))
                 nil)
-            (if proved-seq
-                (b* (
-                     (- (cw "~%Best progress: ~x0 helper lemma(s) proved before limit.~%"
-                             (len proved-seq)))
-                     (- (print-proof-sequence proved-seq)))
-                  nil)
+            (if context
+                (cw "~%Best progress: ~x0 helper lemma(s) proved before limit.~%"
+                    (len context))
               (cw "~%No lemmas were successfully proved.~%"))))
 
        (- (if proved-p
@@ -613,31 +726,34 @@
                 search-limit step-limit)))
 
        (- (cw "~%Total time: ~f0 seconds~%" elapsed)))
-    ; AI path: if proved, admit via encapsulate — helpers are local (not exported),
+    ; AI path: if proved, admit via encapsulate -- helpers are local (not exported),
     ; only the final theorem lands in the world.
-    ; On failure, return :invisible — world stays clean (revert-world cleaned up).
+    ; On failure, return :invisible -- world stays clean (revert-world cleaned up).
     (if proved-p
-        (value (make-encapsulate-form proved-seq state))
+        (value (make-encapsulate-form context state))
       (value '(value-triple :invisible)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;; Section 7: auto Macro
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-; (auto <form> :time 30 :step 5 :search 5)
+; (auto <form> :time 30 :step 3 :search 2)
 ;
 ; <form>    -- any ACL2 event (property, defthm, definec, ...)
 ; :time N   -- seconds per proof attempt (default 30)
-; :step N   -- max AI suggestions per search (default 5)
-; :search N -- max distinct searches (default 5)
-; :verbose t -- (debug) print model prompt and raw output
+; :step N   -- max depth of the search tree (default 3)
+; :search N -- max AI suggestion attempts per node (default 2)
+; :verbose t -- print model prompt, raw output, search tree, and proven lemmas
+;
+; Worst-case AI queries = search + search^2 + ... + search^step.
+; With defaults (search=2, step=3): 2 + 4 + 8 = 14 queries maximum.
 ;
 ; Using (auto ...) always invokes the AI proof-search pipeline.
-; No global flag needed — just use the macro.
+; No global flag needed -- just use the macro.
 (defmacro auto (form &rest kwd-args)
   (b* ((time-limit   (or (cadr (acl2::assoc-keyword :time    kwd-args)) 30))
-       (step-limit   (or (cadr (acl2::assoc-keyword :step    kwd-args)) 5))
-       (search-limit (or (cadr (acl2::assoc-keyword :search  kwd-args)) 5))
+       (step-limit   (or (cadr (acl2::assoc-keyword :step    kwd-args)) 3))
+       (search-limit (or (cadr (acl2::assoc-keyword :search  kwd-args)) 2))
        (verbose      (cadr (acl2::assoc-keyword :verbose kwd-args))))
     `(with-output :off summary
        (make-event
