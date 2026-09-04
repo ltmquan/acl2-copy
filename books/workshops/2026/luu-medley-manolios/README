@@ -1,0 +1,55 @@
+Formalizing the Connectivity Theorem for the Matrix Multiplication Flip Graph in ACL2
+Quan Luu, Zeke Medley, Panagiotis Manolios (ACL2 Workshop 2026)
+
+Supporting materials for the paper: an ACL2 proof that the flip graph of
+matrix multiplication schemes over F2 is strongly connected under flip and
+plus transformations (Theorem 4.1 of Medley, Gokul, Luu and Manolios,
+"GPU-Accelerated Search for Fast Matrix Multiplication over F2", ALENEX 2027).
+The main theorem is flip-plus-connectivity in main.lisp.
+
+Certification
+-------------
+From this directory, with ACL2 built and the community books available:
+
+  cert.pl -j 4 overview-proof.lisp
+
+certifies every book (overview-proof includes overview-prelims, which
+includes main, which includes the rest).  The development was certified with
+a development snapshot of ACL2 8.7 (git 98c07036d7, 2026-09-01) on SBCL 2.6.4
+(macOS, Apple Silicon); certifying everything from scratch takes about one
+minute with four parallel jobs.  It uses no trust tags, skip-proofs or defaxiom, and
+depends only on std (util/define, util/defrule, obags, lists, basic),
+kestrel/bv (bitand, bitxor) and arithmetic/top-with-meta from the community
+books.
+
+Where to start
+--------------
+overview-prelims.lisp and overview-proof.lisp are a commented tour of the
+development: every definition and theorem discussed in the paper, restated
+verbatim from the books below with proof hints and routine typing theorems
+left out.  Because ACL2 accepts a restated event only if it is identical to
+the original, certifying the two files checks that the tour agrees with the
+development.  Read overview-prelims.lisp first.
+
+Books
+-----
+bits.lisp           bit lists and bit matrices over F2
+bags.lisp           lemmas about ordered bags (std/obags) used for schemes
+scheme.lisp         summands, schemes, flip and plus, moves and paths
+tensor.lisp         tensors of summands and schemes
+preservation.lisp   valid paths preserve the scheme sum
+mm-tensor.lisp      the matrix multiplication tensor
+mmt.lisp            lemma:mmt, the entry law of mm-tensor
+span.lisp           lemma:span, the spanning lemma
+add-duplicate.lisp  lemma:add-duplicate-sum, adding a duplicate sum
+paths.lisp          composing paths; deleting an identical pair
+entry.lisp          entry lemmas for the operations on bit lists
+iterate.lisp        walking a chain of duplicate-sum steps (grow-chain)
+gf2span.lisp        the F2 span layer: in-spanp, span-witness, bases
+arbitrary.lisp      the A, B and C legs of adding an arbitrary summand
+add-arbitrary.lisp  lem:add-arbitrary, adding an arbitrary summand
+parity.lisp         unit summands and the even-multiplicity argument
+zero-support.lisp   decomposing summands into unit summands
+zero-subset.lisp    lemma:zero-subset, deleting a zero-summing submultiset
+main.lisp           thm:main, flip-plus-connectivity
+overview-prelims.lisp, overview-proof.lisp   the commented tour (see above)
