@@ -919,10 +919,10 @@
      bitxor-of-myif-arg1
      bitxor-of-myif-arg2
 
-     equal-of-bvchop-and-constant-when-bvlt-constant-1
-     equal-of-bvchop-and-constant-when-bvlt-constant-2
-     equal-of-bvchop-and-constant-when-not-bvlt-constant-1
-     equal-of-bvchop-and-constant-when-not-bvlt-constant-2
+     not-equal-of-bvchop-and-constant-when-bvlt-constant-1
+     not-equal-of-bvchop-and-constant-when-bvlt-constant-2
+     not-equal-of-bvchop-and-constant-when-not-bvlt-constant-1
+     not-equal-of-bvchop-and-constant-when-not-bvlt-constant-2
 
      getbit-identity-free ;Sun Mar 13 03:18:26 2011
 
@@ -1242,7 +1242,7 @@
      getbit-test-is-self ;make a myif version?
 
      getbit-too-high-is-0-bind-free-axe
-     getbit-too-high-cheap-free
+     getbit-too-high-when-unsigned-byte-p-free
      ;; high-getbit-of-getbit-is-0 ; handled by getbit-too-high-is-0-bind-free-axe
      getbit-of-if
 ;            getbit-of-bvif ;could be expensive? newww
@@ -3074,10 +3074,10 @@
             integerp-of-len
             bvlt-of-plus-arg1
             bvlt-of-plus-arg2
-            equal-of-bvchop-and-constant-when-bvlt-constant-1
-            equal-of-bvchop-and-constant-when-bvlt-constant-2
-            equal-of-bvchop-and-constant-when-not-bvlt-constant-1
-            equal-of-bvchop-and-constant-when-not-bvlt-constant-2
+            not-equal-of-bvchop-and-constant-when-bvlt-constant-1
+            not-equal-of-bvchop-and-constant-when-bvlt-constant-2
+            not-equal-of-bvchop-and-constant-when-not-bvlt-constant-1
+            not-equal-of-bvchop-and-constant-when-not-bvlt-constant-2
             bvlt-when-bvlt-must-be-fake-free-axe ;thu mar 17 15:36:51 2011
             bvlt-when-bvlt-must-be-gen-axe ;fri may  6 21:22:34 2011
             bvlt-of-max-arg3-axe
@@ -3192,7 +3192,7 @@
              equal-of-map-reverse-list-and-map-reverse-list ;Tue Feb  8 15:08:06 2011
 
              ;; logext can still appear (if arraycopy is called):
-             logext-when-usb-cheap
+             logext-when-unsigned-byte-p-free
              logext-identity-when-usb-smaller-axe
 
              all-unsigned-byte-p-of-take-of-subrange ;Fri Dec 17 03:22:09 2010
@@ -3360,7 +3360,7 @@
              bv-array-clear-range-of-bv-array-write-too-high
 
              bv-array-clear-length-1-of-list-zero ;Wed Apr 14 00:23:10 2010
-             bvchop-identity-cheap ;moved from prover rules
+             bvchop-identity-free ;moved from prover rules
              bvplus-of-bvcat-and-bvuminus-of-bvcat ;Tue Apr 13 16:17:40 2010
              bvminus-of-constant-and-bvplus-of-constant ;Sun Apr 11 17:17:35 2010
              true-listp-of-add-to-end
