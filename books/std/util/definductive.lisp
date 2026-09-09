@@ -20,6 +20,7 @@
 (include-book "kestrel/event-macros/screen-printing" :dir :system)
 (include-book "kestrel/fty/deffixequiv-sk" :dir :system)
 (include-book "kestrel/fty/set-list" :dir :system)
+(include-book "kestrel/fty/symbol-option" :dir :system)
 (include-book "kestrel/fty/symbol-set" :dir :system)
 (include-book "kestrel/fty/symbol-set-list" :dir :system)
 (include-book "kestrel/fty/symbol-set-list-list" :dir :system)
@@ -1082,7 +1083,7 @@
 (define defind-rule-deriving-pred ((pred-name symbolp)
                                    (preds symbol-setp)
                                    (irule-infos defind-irule-info-listp))
-  :returns (rule? symbolp)
+  :returns (rule? symbol-optionp)
   :short "Find the first rule, if any, that
           has a given predicate as its conclusion
           and whose premises only contain predicates in a given set."
@@ -1094,16 +1095,19 @@
      has the predicate @('pred-name') in its conclusion
      and whose premise predicates (see @(tsee defind-preds-in-premises))
      are all in the @('preds') set;
-     we return @('nil') if there is no such rule.
+     we return no name if there is no such rule.
      Such a rule can derive the predicate,
-     given that the predicates in the set can be derived."))
-  (b* (((when (endp irule-infos)) nil)
+     given that the predicates in the set can be derived.")
+   (xdoc::p
+    "The result is an optional symbol,
+     so that a rule named @('nil') is distinguished from no rule."))
+  (b* (((when (endp irule-infos)) (symbol-option-none))
        ((defind-irule-info info) (car irule-infos))
        ((when (and (equal (defind-conclusion-info->name info.conclusion)
                           (symbol-lfix pred-name))
                    (set::subset (defind-preds-in-premises info.premises)
                                 (symbol-sfix preds))))
-        info.name))
+        (symbol-option-some info.name)))
     (defind-rule-deriving-pred pred-name preds (cdr irule-infos))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -1201,7 +1205,9 @@
                             (set::tail preds-to-do)
                             leveled
                             irule-infos)))
-          (if (defind-rule-deriving-pred pred leveled irule-infos)
+          (if (symbol-option-case
+               (defind-rule-deriving-pred pred leveled irule-infos)
+               :some)
               (set::insert pred new-leveled)
             new-leveled))
         :verify-guards :after-returns
@@ -1336,11 +1342,11 @@
        (derivable-preds
         (set::union (set::set-list-union (take (nfix level) levels))
                     (symbol-sfix preds-in-previous-cliques)))
-       (rule (defind-rule-deriving-pred pred-name derivable-preds irule-infos))
-       ((unless rule)
+       (rule? (defind-rule-deriving-pred pred-name derivable-preds irule-infos))
+       ((when (symbol-option-case rule? :none))
         (raise "Internal error: no override rule for predicate ~x0."
                (symbol-lfix pred-name))))
-    rule)
+    (symbol-option-some->val rule?))
   :no-function nil
   :guard-hints (("Goal" :in-theory (enable set-listp-when-symbol-set-listp))))
 
@@ -3180,6 +3186,24 @@
      a clique of mutually recursive fixtypes,
      the limit is in the enclosing @(tsee fty::deftypes) instead.")
    (xdoc::p
+    "The @(':enable-rules') option adds the definition of @(tsee acl2-count)
+     to the theory in which FTY admits the fixtype.
+     FTY tests for non-@(tsee consp) values
+     only in the kind test of the base summand,
+     which is the first one without recursive fields unless overridden;
+     a summand before it is recognized by its tag alone.
+     For the summand of a recursive rule that precedes
+     the base rules of its predicate,
+     the termination proof of the fixing function
+     thus lacks the @(tsee consp) hypothesis
+     that the lemmas in FTY's theory need,
+     and FTY falls back to the surrounding theory,
+     where the definition of @(tsee acl2-count) closes the goal.
+     But the surrounding book may have that definition disabled,
+     in which case the fixtype fails;
+     enabling it explicitly makes the fixtype independent of
+     the order of the rules.")
+   (xdoc::p
     "The @(':xvar') option is necessary:
      since the fields are named after the variables of the rules,
      the default @('x') would clash with a rule variable @('x'),
@@ -3191,7 +3215,8 @@
        (summands (defind-gen-proof-summands pred-name infos name))
        (measurep (consp (cdr (symbol-set-list-fix levels))))
        (level (defind-pred-level pred-name levels))
-       (override-rule (and (< 0 level)
+       (overridep (< 0 level))
+       (override-rule (and overridep
                            (defind-pred-override-rule
                              pred-name level levels
                              preds-in-previous-cliques infos)))
@@ -3206,12 +3231,13 @@
                                                      (symbol-lfix pred-name)))
                               "').")))
             ,@summands
-            ,@(and override-rule
+            ,@(and overridep
                    `(:base-case-override ,(defind-irule-tag override-rule)))
             ,@(and measurep
                    `(:measure (two-nats-measure (acl2-count ,xvar) ,level)))
             :pred ,(defind-proof-recog-name pred-name name)
             :xvar ,xvar
+            :enable-rules (acl2-count)
             ,@(and prepworkp
                    '(:prepwork ((set-induction-depth-limit 1))))))
        (print-event?

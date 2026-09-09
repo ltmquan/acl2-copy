@@ -13,6 +13,7 @@
 
 (include-book "definductive")
 
+(include-book "kestrel/built-ins/disable" :dir :system)
 (include-book "std/testing/must-be-redundant" :dir :system)
 (include-book "std/testing/must-fail" :dir :system)
 (include-book "std/testing/must-succeed-star" :dir :system)
@@ -290,6 +291,53 @@
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+; A rule may be named NIL.
+; In the first definition, NIL names the base rule,
+; which puts the predicate at level 0;
+; in the second, NIL names the only rule that derives ODD,
+; which puts ODD at level 1
+; and provides the base case override of its fixtype of proofs.
+
+(must-succeed*
+
+ (definductive nil-base-rule
+   :preds ((p x))
+   :irules ((nil ()
+                 (p 0))
+            (step ((p x))
+                  (p (cons x x)))))
+
+ (must-be-redundant
+  (defthm p-nil
+    (p 0)))
+
+ (must-be-redundant
+  (defthm p-step
+    (implies (p x)
+             (p (cons x x))))))
+
+(must-succeed*
+
+ (definductive nil-override-rule
+   :preds ((even n)
+           (odd n))
+   :irules ((even-0 ()
+                    (even 0))
+            (even-step ((natp n)
+                        (odd n))
+                       (even (1+ n)))
+            (nil ((natp n)
+                  (even n))
+                 (odd (1+ n)))))
+
+ (must-be-redundant
+  (defthm odd-nil
+    (implies (and (even n)
+                  (natp n))
+             (odd (1+ n))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 ; A non-recursive predicate is allowed:
 ; the generated proof validity function is not recursive,
 ; so it carries no measure and its theorems avoid induction.
@@ -398,6 +446,39 @@
                    (p (cons x x)))
             (step2 ((p x) (p y))
                    (p (cons x y))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+; A recursive rule listed before the base rule of its predicate,
+; with the built-in logic definitions disabled, as some books do.
+; FTY tests for non-CONSP values only in the kind test of the base summand,
+; so the termination of the fixing function for the summand of STEP
+; needs the definition of ACL2-COUNT, which the generated fixtype enables.
+
+(must-succeed*
+
+ (disable-most-builtin-logic-defuns)
+
+ (definductive rec-rule-first
+   :preds ((p x))
+   :irules ((step ((p x))
+                  (p (cons x x)))
+            (base ()
+                  (p nil))))
+
+ (must-be-redundant
+  (defthm p-step
+    (implies (p x)
+             (p (cons x x)))))
+
+ (must-be-redundant
+  (defthm p-base
+    (p nil)))
+
+ (must-be-redundant
+  (defthm p-alt-when-p
+    (implies (p x)
+             (p-alt x)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
