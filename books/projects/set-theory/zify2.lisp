@@ -31,56 +31,76 @@
 ; We reuse acl2, zify-prop, the argument checks, and prodn* from zify.
 (include-book "zify")
 
-;;; The generic function.  Its constraints are what zfn exports for
-;;; (zfn g2-rel () x y (g2-dom) (equal (equal y (g2-fn x)) t)), with y
-;;; instantiated: by (g2-fn x) in $domain-2 and by the value of apply in
-;;; $chooses.  Zify2 proves those two instances per function (NAME$in-domain
-;;; and NAME$apply below), by :use, so no rule with a free y is ever needed.
+;;; The generic function.  Its constraints are exactly what zfn exports for
+;;; (zfn g2-rel () x y (g2-dom) (equal (equal y (g2-fn x)) t)), with the same
+;;; names, so for each NAME the functional-instance obligations are just zfn's
+;;; NAME$funp, NAME$domain-1, NAME$domain-2 and NAME$chooses.  G2-rel$prop
+;;; stands for NAME$prop (conjoined with the :props) and g2-dom$prop for the
+;;; props of NAME$domain-1, which zfn proves with defthmz: (domain$prop) and
+;;; (zfc).
 
 (encapsulate
-  (((g2-prop) => *)
+  (((g2-rel$prop) => *)
+   ((g2-dom$prop) => *)
    ((g2-dom) => *)
    ((g2-rel) => *)
    ((g2-fn *) => *))
-  (local (defun g2-prop () nil))
+  (local (defun g2-rel$prop () nil))
+  (local (defun g2-dom$prop () nil))
   (local (defun g2-dom () 0))
   (local (defun g2-rel () 0))
   (local (defun g2-fn (x) x))
   (defthm g2-rel$funp
-    (funp (g2-rel)))
-  (defthmz g2-rel$domain-1
-    (implies (force (domain$prop))
+    (funp (g2-rel))
+    :hints (("Goal" :in-theory (enable funp-0))))
+  (defthm g2-rel$domain-1
+    (implies (force (g2-dom$prop))
              (subset (domain (g2-rel))
-                     (g2-dom)))
-    :hints (("Goal" :in-theory (enable domain-0))))
-  (defthm g2-rel$in-domain
-    (implies (and (in x (g2-dom))
-                  (force (g2-prop)))
-             (in x (domain (g2-rel)))))
-  (defthm g2-rel$apply
-    (implies (and (in x (domain (g2-rel)))
-                  (force (g2-prop)))
-             (equal (apply (g2-rel) x)
-                    (g2-fn x)))))
+                     (g2-dom))))
+  (defthm g2-rel$domain-2
+    (implies (and (in g2-x (g2-dom))
+                  (equal (equal g2-y (g2-fn g2-x)) t)
+                  (force (g2-rel$prop)))
+             (in g2-x (domain (g2-rel)))))
+  (defthm g2-rel$chooses
+    (implies (and (equal (apply (g2-rel) g2-x) g2-y)
+                  (in g2-x (domain (g2-rel)))
+                  (force (g2-rel$prop)))
+             (equal (equal g2-y (g2-fn g2-x)) t))))
+
+; The free g2-y in g2-rel$domain-2 makes it useless as a rewrite rule, so we
+; use instances of it.  The same goes for the obligation NAME$domain-2 in each
+; functional instance below, which zify2 proves with a computed hint.  The
+; variables g2-x and g2-y, rather than x and y, are what such obligations
+; mention, so they should not clash with the variables of FN.
+
+(in-theory (disable g2-rel$domain-2 g2-rel$chooses))
+
+(defthm g2-rel-is-g2-fn
+  (implies (and (in x (g2-dom))
+                (force (g2-rel$prop)))
+           (equal (apply (g2-rel) x)
+                  (g2-fn x)))
+  :hints (("Goal" :use ((:instance g2-rel$domain-2 (g2-x x) (g2-y (g2-fn x)))
+                        (:instance g2-rel$chooses (g2-x x) (g2-y (apply (g2-rel) x)))))))
 
 (defthm domain-g2-rel
-  (implies (and (force (g2-prop))
+  (implies (and (force (g2-rel$prop))
+                (force (g2-dom$prop))
                 (force (zify-prop)))
            (equal (domain (g2-rel))
                   (g2-dom)))
   :hints (("Goal"
            :expand ((subset (g2-dom) (domain (g2-rel))))
+           :use ((:instance g2-rel$domain-2
+                            (g2-x (subset-witness (g2-dom) (domain (g2-rel))))
+                            (g2-y (g2-fn (subset-witness (g2-dom)
+                                                         (domain (g2-rel)))))))
            :in-theory (enable extensionality-rewrite))))
 
-(defthm g2-rel-is-g2-fn
-  (implies (and (in x (g2-dom))
-                (force (g2-prop))
-                (force (zify-prop)))
-           (equal (apply (g2-rel) x)
-                  (g2-fn x))))
-
 (defthm in-g2-rel
-  (implies (and (force (g2-prop))
+  (implies (and (force (g2-rel$prop))
+                (force (g2-dom$prop))
                 (force (zify-prop)))
            (equal (in p (g2-rel))
                   (and (consp p)
@@ -96,15 +116,17 @@
   (local (defun g2-ran () (image (g2-rel))))
   (defthm g2-fn-maps-to-g2-ran
     (implies (and (in x (g2-dom))
-                  (g2-prop)
+                  (g2-rel$prop)
                   (zify-prop))
              (in (g2-fn x) (g2-ran)))
     :hints (("Goal"
-             :use ((:instance in-apply-image (r (g2-rel)))))))
+             :use ((:instance in-apply-image (r (g2-rel)))
+                   (:instance g2-rel$domain-2 (g2-x x) (g2-y (g2-fn x)))))))
   (in-theory (disable g2-fn-maps-to-g2-ran)))
 
 (defthm image-g2-rel
-  (implies (and (force (g2-prop))
+  (implies (and (force (g2-rel$prop))
+                (force (g2-dom$prop))
                 (force (zify-prop)))
            (subset (image (g2-rel)) (g2-ran)))
   :hints (("Goal"
@@ -123,11 +145,23 @@
   (declare (xargs :guard t))
   `(:functional-instance
     ,thm
-    (g2-prop (lambda () ,prop))
+    (g2-rel$prop (lambda () ,prop))
+    (g2-dom$prop (lambda () (and (domain$prop) (zfc))))
     (g2-dom (lambda () ,dom))
     (g2-rel (lambda () ,call))
     (g2-fn (lambda (,x) ,fx))
     ,@(and (true-listp extra) extra)))
+
+(defun zify2-hints (fi theory domain-2-inst)
+
+; The hints for a functional instance fi of a generic theorem.  All of its
+; obligations but NAME$domain-2 are proved in theory; see the comment after
+; the encapsulate above for that one.
+
+  (declare (xargs :guard t))
+  `(("Goal" :use ,fi :in-theory ,theory)
+    (and stable-under-simplificationp
+         '(:use ,domain-2-inst))))
 
 (defun zify2-fn (name fn dom ran props xhyps args var verbose out)
 
@@ -167,18 +201,22 @@
          (fxl (if (and (natp out) (< 1 out))
                   `(mv-list ,out ,fx)
                 fx))
-         (name$in-domain (and name (packn (list name '$in-domain))))
-         (name$apply (and name (packn (list name '$apply))))
          (zfn-rules (and name
                          (list (packn (list name '$funp))
                                (packn (list name '$domain-1))
-                               name$in-domain
-                               name$apply)))
-         (min-theory '(union-theories '(force mv-list) (theory 'minimal-theory)))
+                               (packn (list name '$domain-2))
+                               (packn (list name '$chooses)))))
 
 ; The generic prop is (NAME$prop) and the props, plus the xhyps for the image
 ; theorem.
 
+         (fxl-g2 (let ((f `(,fn g2-x ,@fn-params)))
+                   (if (and (natp out) (< 1 out))
+                       `(mv-list ,out ,f)
+                     f)))
+         (domain-2-inst `(:instance ,(packn (list name '$domain-2))
+                                    (,x g2-x)
+                                    (,y ,fxl-g2)))
          (gprop (if props
                     `(and (,name$prop) ,@(props-to-hyps props))
                   `(,name$prop)))
@@ -205,24 +243,6 @@
                (zfn ,name ,all-args ,x ,y ,dom
                     (equal (equal ,y ,fxl) t)))
 
-             (defthmd ,name$in-domain
-               (implies (and (in ,x ,dom)
-                             (force (,name$prop)))
-                        (in ,x (domain ,call)))
-               :hints (("Goal"
-                        :use ((:instance ,(packn (list name '$domain-2))
-                                         (,y ,fxl)))
-                        :in-theory ,min-theory)))
-
-             (defthmd ,name$apply
-               (implies (and (in ,x (domain ,call))
-                             (force (,name$prop)))
-                        (equal (apply ,call ,x) ,fxl))
-               :hints (("Goal"
-                        :use ((:instance ,(packn (list name '$chooses))
-                                         (,y (apply ,call ,x))))
-                        :in-theory ,min-theory)))
-
              (defthm ,(prefix-symbol "FUNP-" name)
                (funp ,call))
 
@@ -230,8 +250,8 @@
                (implies (and (force ,gprop)
                              (force (zify-prop)))
                         (equal (domain ,call) ,dom))
-               :hints (("Goal" :use ,(zify2-fi 'domain-g2-rel gprop dom call x fxl nil)
-                         :in-theory ,theory)))
+               :hints ,(zify2-hints (zify2-fi 'domain-g2-rel gprop dom call x fxl nil)
+                                    theory domain-2-inst))
 
              (defthm ,(suffix-symbol (concatenate 'string "-IS-"
                                                   (symbol-name fn))
@@ -240,8 +260,8 @@
                              (force ,gprop)
                              (force (zify-prop)))
                         (equal (apply ,call ,x) ,fx))
-               :hints (("Goal" :use ,(zify2-fi 'g2-rel-is-g2-fn gprop dom call x fxl nil)
-                         :in-theory ,theory)))
+               :hints ,(zify2-hints (zify2-fi `(:instance g2-rel-is-g2-fn (x ,x)) gprop dom call x fxl nil)
+                                    theory domain-2-inst))
 
              (defthm ,(prefix-symbol "IN-" name)
                (implies (and (force ,gprop)
@@ -251,8 +271,8 @@
                                     (in (car ,var) ,dom)
                                     (equal (cdr ,var)
                                            (,fn (car ,var) ,@fn-params)))))
-               :hints (("Goal" :use ,(zify2-fi 'in-g2-rel gprop dom call x fxl nil)
-                         :in-theory ,theory)))
+               :hints ,(zify2-hints (zify2-fi `(:instance in-g2-rel (p ,var)) gprop dom call x fxl nil)
+                                    theory domain-2-inst))
 
              ,@(and ran
                     `((defthm ,maps-name
@@ -266,11 +286,11 @@
                                       (force (zify-prop)))
                                  (subset (image ,call) ,ran))
                         :hints
-                        (("Goal"
-                          :use ,(zify2-fi 'image-g2-rel gprop-ran dom call x fxl
-                                        `((g2-ran (lambda () ,ran))))
-                          :in-theory (union-theories '(,maps-name)
-                                                     ,theory))))))
+                        ,(zify2-hints
+                          (zify2-fi 'image-g2-rel gprop-ran dom call x fxl
+                                    `((g2-ran (lambda () ,ran))))
+                          `(union-theories '(,maps-name) ,theory)
+                          domain-2-inst))))
              (value-triple ',name))))
     (cond (verbose form)
           (t `(with-output :off (:other-than error) :gag-mode nil
