@@ -156,11 +156,7 @@
     (and stable-under-simplificationp
          '(:use ,domain-2-inst))))
 
-(defun zify2-fn (name fn dom ran props xhyps args var verbose out)
-
-; Out is the number of values that fn returns.  Zfn puts its relation in a
-; defun body, where a call of a multiple-value fn must be wrapped in mv-list.
-
+(defun zify2-fn (name fn dom ran props xhyps args var verbose)
   (declare (xargs :guard t))
   (let* ((name0 name)
          (name (and (symbolp name) name))
@@ -191,9 +187,6 @@
          (all-args (append fn-params (and (symbol-listp args) args)))
          (call (cons name all-args))
          (fx `(,fn ,@fn-args))
-         (fxl (if (and (natp out) (< 1 out))
-                  `(mv-list ,out ,fx)
-                fx))
          (zfn-rules (and name
                          (list (packn (list name '$funp))
                                (packn (list name '$domain-1))
@@ -203,13 +196,9 @@
 ; The generic prop is (NAME$prop) and the props, plus the xhyps for the image
 ; theorem.
 
-         (fxl-g2 (let ((f `(,fn g2-x ,@fn-params)))
-                   (if (and (natp out) (< 1 out))
-                       `(mv-list ,out ,f)
-                     f)))
          (domain-2-inst `(:instance ,(packn (list name '$domain-2))
                                     (,x g2-x)
-                                    (,y ,fxl-g2)))
+                                    (,y (,fn g2-x ,@fn-params))))
          (gprop (if props
                     `(and (,name$prop) ,@(props-to-hyps props))
                   `(,name$prop)))
@@ -217,7 +206,7 @@
                         `(and ,gprop ,@xhyps)
                       gprop))
          (maps-name (suffix-symbol "-MAPS-TO-RAN" name))
-         (theory `(union-theories '(force mv-list zify-prop ,@zfn-rules)
+         (theory `(union-theories '(force zify-prop ,@zfn-rules)
                                   (theory 'minimal-theory)))
          (form
           `(progn
@@ -234,7 +223,7 @@
                (local (in-theory (union-theories '(domain-0 subset-0 funp-0)
                                                  (theory 'minimal-theory))))
                (zfn ,name ,all-args ,x ,y ,dom
-                    (equal (equal ,y ,fxl) t)))
+                    (equal (equal ,y ,fx) t)))
 
              (defthm ,(prefix-symbol "FUNP-" name)
                (funp ,call))
@@ -243,7 +232,7 @@
                (implies (and (force ,gprop)
                              (force (zify-prop)))
                         (equal (domain ,call) ,dom))
-               :hints ,(zify2-hints (zify2-fi 'domain-g2-rel gprop dom call x fxl nil)
+               :hints ,(zify2-hints (zify2-fi 'domain-g2-rel gprop dom call x fx nil)
                                     theory domain-2-inst))
 
              (defthm ,(suffix-symbol (concatenate 'string "-IS-"
@@ -253,7 +242,7 @@
                              (force ,gprop)
                              (force (zify-prop)))
                         (equal (apply ,call ,x) ,fx))
-               :hints ,(zify2-hints (zify2-fi `(:instance g2-rel-is-g2-fn (x ,x)) gprop dom call x fxl nil)
+               :hints ,(zify2-hints (zify2-fi `(:instance g2-rel-is-g2-fn (x ,x)) gprop dom call x fx nil)
                                     theory domain-2-inst))
 
              (defthm ,(prefix-symbol "IN-" name)
@@ -264,7 +253,7 @@
                                     (in (car ,var) ,dom)
                                     (equal (cdr ,var)
                                            (,fn (car ,var) ,@fn-params)))))
-               :hints ,(zify2-hints (zify2-fi `(:instance in-g2-rel (p ,var)) gprop dom call x fxl nil)
+               :hints ,(zify2-hints (zify2-fi `(:instance in-g2-rel (p ,var)) gprop dom call x fx nil)
                                     theory domain-2-inst))
 
              ,@(and ran
@@ -280,7 +269,7 @@
                                  (subset (image ,call) ,ran))
                         :hints
                         ,(zify2-hints
-                          (zify2-fi 'image-g2-rel gprop-ran dom call x fxl
+                          (zify2-fi 'image-g2-rel gprop-ran dom call x fx
                                     `((g2-ran (lambda () ,ran))))
                           `(union-theories '(,maps-name) ,theory)
                           domain-2-inst))))
@@ -289,19 +278,9 @@
           (t `(with-output :off (:other-than error) :gag-mode nil
                 ,form)))))
 
-(defun zify2-out-arity (fn wrld)
-  (declare (xargs :guard (plist-worldp wrld)))
-  (let ((f (if (consp fn) (car fn) fn)))
-    (if (symbolp f)
-        (len (getpropc f 'acl2::stobjs-out '(nil) wrld))
-      1)))
-
 (defmacro zify2 (name fn &key dom ran props xhyps args (var 'p) verbose)
   (declare (xargs :guard t))
-  `(make-event
-    (value (zify2-fn ',name ',fn ',dom ',ran ',props ',xhyps ',args ',var
-                     ',verbose (zify2-out-arity ',fn (w state))))
-    :on-behalf-of :quiet))
+  (zify2-fn name fn dom ran props xhyps args var verbose))
 
 (defun zify2*-fn (name fn arity dom ran props xhyps params args var verbose
                        fn* fn*-var fn*-dcls)

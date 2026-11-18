@@ -603,11 +603,13 @@
             ((,name ,@(make-list (length args) :initial-element '*)) => *))
            (local (defun ,name$prop ()
                     nil))
-           (local (defun ,name ,args
+           (local (defun-nx ,name ,args
 
 ; We check that all free variables of bound are among args, as are all free
 ; variables of u other than x and y.  We also check that x and y do not occur
-; free in bound.
+; free in bound.  As for zsub, we use defun-nx in case u is not well-formed
+; with respect to multiple-value checking, as when u calls a function that
+; returns multiple values (see zify2.lisp).
 
                     (declare (ignorable ,@args))
                     (prog2$ (list (check-vars-not-free (,x ,y) ,bound)
@@ -971,7 +973,7 @@
                   (PROGN
                    (ENCAPSULATE (((F1$PROP) => *) ((F1 * *) => *))
                      (LOCAL (DEFUN F1$PROP NIL NIL))
-                     (LOCAL (DEFUN F1 (A1 Z)
+                     (LOCAL (DEFUN-NX F1 (A1 Z)
                               (DECLARE (IGNORABLE A1 Z))
                               (PROG2$
                                (LIST (CHECK-VARS-NOT-FREE (X1 Y1) A1)
