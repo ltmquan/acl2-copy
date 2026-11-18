@@ -31,10 +31,13 @@
 ; We reuse acl2, zify-prop, the argument checks, and prodn* from zify.
 (include-book "zify")
 
-;;; The generic function.  Its constraints are exactly what zfn exports for
+;;; The generic function.  Its constraints are what zfn exports for
 ;;; (zfn g2-rel () x y (g2-dom) (equal (equal y (g2-fn x)) t)), with the same
-;;; names, so for each NAME the functional-instance obligations are just zfn's
-;;; NAME$funp, NAME$domain-1, NAME$domain-2 and NAME$chooses.  G2-rel$prop
+;;; names, so for each NAME the functional-instance obligations are zfn's
+;;; NAME$funp, NAME$domain-1, NAME$domain-2 and NAME$chooses.  The one
+;;; difference is in g2-rel$domain-2: zfn's has the hypothesis u, here
+;;; (equal (equal g2-y (g2-fn g2-x)) t), which always holds for some g2-y, so
+;;; we drop it; that also removes the free variable g2-y.  G2-rel$prop
 ;;; stands for NAME$prop (conjoined with the :props) and g2-dom$prop for the
 ;;; props of NAME$domain-1, which zfn proves with defthmz: (domain$prop) and
 ;;; (zfc).
@@ -59,7 +62,6 @@
                      (g2-dom))))
   (defthm g2-rel$domain-2
     (implies (and (in g2-x (g2-dom))
-                  (equal (equal g2-y (g2-fn g2-x)) t)
                   (force (g2-rel$prop)))
              (in g2-x (domain (g2-rel)))))
   (defthm g2-rel$chooses
@@ -68,21 +70,17 @@
                   (force (g2-rel$prop)))
              (equal (equal g2-y (g2-fn g2-x)) t))))
 
-; The free g2-y in g2-rel$domain-2 makes it useless as a rewrite rule, so we
-; use instances of it.  The same goes for the obligation NAME$domain-2 in each
-; functional instance below, which zify2 proves with a computed hint.  The
-; variables g2-x and g2-y, rather than x and y, are what such obligations
+; Zfn's NAME$domain-2, by contrast, has u as a hypothesis with a free y, so it
+; does not prove the obligation for g2-rel$domain-2 by rewriting; zify2 proves
+; that obligation with a computed hint, using NAME$domain-2 with y instantiated.
+; The variables g2-x and g2-y, rather than x and y, are what such obligations
 ; mention, so they should not clash with the variables of FN.
-
-(in-theory (disable g2-rel$domain-2 g2-rel$chooses))
 
 (defthm g2-rel-is-g2-fn
   (implies (and (in x (g2-dom))
                 (force (g2-rel$prop)))
            (equal (apply (g2-rel) x)
-                  (g2-fn x)))
-  :hints (("Goal" :use ((:instance g2-rel$domain-2 (g2-x x) (g2-y (g2-fn x)))
-                        (:instance g2-rel$chooses (g2-x x) (g2-y (apply (g2-rel) x)))))))
+                  (g2-fn x))))
 
 (defthm domain-g2-rel
   (implies (and (force (g2-rel$prop))
@@ -92,10 +90,6 @@
                   (g2-dom)))
   :hints (("Goal"
            :expand ((subset (g2-dom) (domain (g2-rel))))
-           :use ((:instance g2-rel$domain-2
-                            (g2-x (subset-witness (g2-dom) (domain (g2-rel))))
-                            (g2-y (g2-fn (subset-witness (g2-dom)
-                                                         (domain (g2-rel)))))))
            :in-theory (enable extensionality-rewrite))))
 
 (defthm in-g2-rel
@@ -120,8 +114,7 @@
                   (zify-prop))
              (in (g2-fn x) (g2-ran)))
     :hints (("Goal"
-             :use ((:instance in-apply-image (r (g2-rel)))
-                   (:instance g2-rel$domain-2 (g2-x x) (g2-y (g2-fn x)))))))
+             :use ((:instance in-apply-image (r (g2-rel)))))))
   (in-theory (disable g2-fn-maps-to-g2-ran)))
 
 (defthm image-g2-rel
