@@ -26,10 +26,10 @@
 (defun add2 (x)
   (+ (car x) (cdr x)))
 
-(zify z+ add2 :dom (prod2 (integers) (integers)) :ran (integers)
+(zify2 z+ add2 :dom (prod2 (integers) (integers)) :ran (integers)
       :props (v$prop integers$prop))
 
-(zify z- unary-- :dom (integers) :ran (integers)
+(zify2 z- unary-- :dom (integers) :ran (integers)
       :props (v$prop integers$prop))
 
 (defthmz abelian-group-p-integers

@@ -6,7 +6,7 @@
 
 (include-book "zify")
 
-(zify identity-fun identity :dom s :ran s :args (s))
+(zify2 identity-fun identity :dom s :ran s :args (s))
 
 (defthmz compose-identity-fun-with-fn-equal
   (implies (and (force (funp f))

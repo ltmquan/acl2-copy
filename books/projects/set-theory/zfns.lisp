@@ -48,7 +48,7 @@
 ; Example: If r = {<1,2>} then r = {{{1},{1,2}}}, (union r) = {{1},{1,2}},
 ; and (union (union r)) = {1,2}.
 
-(zify zcar car
+(zify2 zcar car
       :dom r
       :ran (union2 (singleton nil) (union (union r)))
       :args (r)
@@ -84,7 +84,7 @@
          (implies (cdr x)
                   (consp x))))
 
-(zify zcdr cdr
+(zify2 zcdr cdr
       :dom r
       :ran (union2 (singleton nil) (union (union r)))
       :args (r)

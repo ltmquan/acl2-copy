@@ -25,7 +25,7 @@
 ; exists.  We first define a set-theoretic function, z-rational-unary--, which
 ; applies to a rational r to yield (- r).
 
-(zify z-rational-unary-- unary-- :dom s :ran (rationals)
+(zify2 z-rational-unary-- unary-- :dom s :ran (rationals)
       :args (s)
       :xhyps ((rational-setp s))
       :props (rationals$prop v$prop))

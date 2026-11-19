@@ -1034,7 +1034,7 @@
 
 (in-theory (disable good-f-g injective-funp))
 
-(zify fun-bij (my-sb-witness x fun-f fun-g)
+(zify2 fun-bij (my-sb-witness x fun-f fun-g)
       :dom (if (good-f-g fun-f fun-g) (domain fun-f) 0)
       :ran (if (good-f-g fun-f fun-g) (domain fun-g) 0))
 

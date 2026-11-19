@@ -19,7 +19,7 @@
 
 (extend-zfc-table foldr-prop zify-prop v$prop acl2$prop)
 
-(zify* zbinary-* binary-* 2)
+(zify2* zbinary-* binary-* 2)
 
 (thmz (implies (and (acl2p x)
                     (acl2p y))
@@ -45,7 +45,7 @@
                       30))
       :props (foldr-prop zbinary-*$prop acl2$prop))
 
-(zify* zcons* cons 2)
+(zify2* zcons* cons 2)
 
 (thmz (implies (and (acl2p lst)
                     (acl2p init))
@@ -53,7 +53,7 @@
                       (append lst init)))
       :props (foldr-prop zcons*$prop))
 
-(zify* zmax* max 2)
+(zify2* zmax* max 2)
 
 (defthmz acl2p-foldr-zmax*
   (implies (and (acl2p lst)
@@ -94,7 +94,7 @@
                            lst)))
       :props (foldr-prop zmax*$prop))
 
-(zify* zand* and 2
+(zify2* zand* and 2
 ; The following avoids a name conflict.
        :fn* zf::and*)
 
@@ -164,7 +164,7 @@
            (acl2p (map f lst)))
   :props (foldr-prop))
 
-(zify* zcons-fn* cons-fn 2
+(zify2* zcons-fn* cons-fn 2
 ; A function from A to B is a set of ordered pairs <a,b> where a \in A and b
 ; \in B, hence a subset of A X B.
        :dom (prodn (acl2) (acl2))
@@ -195,7 +195,7 @@
       (cons x y)
     y))
 
-(zify* zcons-when-fn* cons-when-fn 2
+(zify2* zcons-when-fn* cons-when-fn 2
 ; A function from A to B is a set of ordered pairs <a,b> where a \in A and b
 ; \in B, hence a subset of A X B.
        :dom (prodn (acl2) (acl2))
@@ -209,7 +209,7 @@
 
 ; A computation example.
 
-(zify zevenp evenp)
+(zify2 zevenp evenp)
 
 (thmz (equal (foldr '(1 4 9 16 25 36 100)
                      (zcons-when-fn* (zevenp))
