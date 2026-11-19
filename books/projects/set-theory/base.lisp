@@ -603,7 +603,7 @@
             ((,name ,@(make-list (length args) :initial-element '*)) => *))
            (local (defun ,name$prop ()
                     nil))
-           (local (defun ,name ,args
+           (local (defun-nx ,name ,args
 
 ; We check that all free variables of bound are among args, as are all free
 ; variables of u other than x and y.  We also check that x and y do not occur
@@ -668,7 +668,7 @@
 ; of u except not including x or y.  We want to introduce an ACL2 function f,
 ; such that the following properties hold.  Think of u as being Boolean and as
 ; having free occurrences of variables x and y, though that isn't necessary
-; (one can always conjoin x=x and y=y to u); let zfn = (f . args); and think of
+; (one can always conjgoin x=x and y=y to u); let zfn = (f . args); and think of
 ; bound as including the domain of zfn.
 
 ; (funp zfn)
@@ -971,7 +971,7 @@
                   (PROGN
                    (ENCAPSULATE (((F1$PROP) => *) ((F1 * *) => *))
                      (LOCAL (DEFUN F1$PROP NIL NIL))
-                     (LOCAL (DEFUN F1 (A1 Z)
+                     (LOCAL (DEFUN-NX F1 (A1 Z)
                               (DECLARE (IGNORABLE A1 Z))
                               (PROG2$
                                (LIST (CHECK-VARS-NOT-FREE (X1 Y1) A1)

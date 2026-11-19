@@ -303,6 +303,258 @@
   (declare (xargs :guard t)) ; see check-zify
   (zify-fn name fn dom ran props xhyps args var verbose))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Zify
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(extend-zfc-table zify2-prop
+		  domain$prop prod2$prop inverse$prop zfc)
+
+(encapsulate
+  (((g2-prop) => *)
+   ((g2-dom) => *)
+   ((g2-rel) => *)
+   ((g2-fn *) => *))
+  (local (defun g2-prop () nil))
+  (local (defun g2-dom () 0))
+  (local (defun g2-rel () 0))
+  (local (defun g2-fn (x) x))
+  (defthm g2-rel$funp
+    (funp (g2-rel)))
+  (defthmz g2-rel$domain-1
+    (implies (force (domain$prop))
+             (subset (domain (g2-rel))
+		     (g2-dom))))
+  (defthm g2-rel$domain-2
+    (implies (and (in x (g2-dom))
+		  (force (g2-prop)))
+             (in x (domain (g2-rel)))))
+  (defthm g2-rel$chooses
+    (implies (and (equal (apply (g2-rel) x) y)
+		  (in x (domain (g2-rel)))
+		  (force (g2-prop)))
+             (equal (equal y (g2-fn x)) t))))
+
+(defthm apply-g2-rel
+  (implies (and (in x (g2-dom))
+                (force (g2-prop)))
+           (equal (apply (g2-rel) x)
+                  (g2-fn x))))
+
+(defthm domain-of-g2-fn-is-g2-dom
+  (implies (and (force (g2-prop))
+		(force (zify2-prop)))
+           (equal (domain (g2-rel))
+		  (g2-dom)))
+  :hints (("Goal" :in-theory (enable extensionality-rewrite subset))))
+
+(defthm in-g2-rel
+  (implies (and (force (zify2-prop))
+		(g2-prop))
+           (equal (in p (g2-rel))
+		  (and (consp p)
+		       (in (car p) (g2-dom))
+		       (equal (cdr p) (g2-fn (car p))))))
+  :hints (("Goal" :use ((:instance apply-intro
+				   (f (g2-rel)))))))
+
+(encapsulate
+  (((g2-ran) => *))
+  (local (defun g2-ran () (image (g2-rel))))
+  (defthm g2-image-is-image
+    (implies (and (in x (g2-dom))
+		  (g2-prop)
+		  (force (zify2-prop)))
+             (in (g2-fn x) (g2-ran)))
+    :hints (("Goal" :use ((:instance in-apply-image (r (g2-rel))))))))
+
+;; this is the same as g2-image-is-image, but works better for the next theorem
+(defthm in-g2-ran
+  (implies (and (equal y (g2-fn x))
+		(in x (g2-dom))
+		(g2-prop)
+		(force (zify2-prop)))
+           (in y (g2-ran))))
+
+(defthm subset-image-g2-rel-g2-ran
+  (implies (and (force (g2-prop))
+		(force (zify2-prop)))
+           (subset (image (g2-rel))
+		   (g2-ran)))
+  :hints (("Goal" :in-theory (enable subset in-image-rewrite))))
+
+(defun zify2-fn (name fn dom ran props xhyps args var verbose)
+  (declare (xargs :guard t))
+  (let* ((name0 name)
+         (name (and (symbolp name)
+                    name))
+         (props0 props)
+         (props (and (true-listp props)
+                     props))
+         (props (if (null dom)
+                    (append '(v$prop acl2$prop) props)
+                  props))
+         (fn-args (cond ((symbolp fn)
+                         (list (suffix-symbol "-ARG" fn)))
+                        ((symbol-listp fn)
+                         (cdr fn))
+                        (t ; error case
+                         nil)))
+         (fn0 fn)
+         (fn (cond ((symbolp fn)
+                    fn)
+                   ((symbol-listp fn)
+                    (car fn))
+                   (t ; error case
+                    nil)))
+         (fn-params (cdr fn-args))
+         (dom (or dom '(acl2)))
+         (name$prop (and (symbolp name)
+                         (suffix-symbol "$PROP" name)))
+         (name$y (and (symbolp name)
+                      (suffix-symbol "$Y" name)))
+         (name$domain-2-better (and (symbolp name)
+                                   (packn (list name '$domain-2-better))))
+         (all-args (append fn-params args))
+         (call (cons name all-args))
+         (hyps (and (true-listp xhyps)
+                    (append? (force-props props)
+                             (pairlis-x1 'force (pairlis-x2 xhyps nil)))))
+         (unforced-hyps (append? (props-to-hyps props) xhyps))
+         (g2-prop-hyp (if unforced-hyps
+                          `(and (,name$prop)
+                                ,@unforced-hyps)
+                        `(,name$prop)))
+         (g2-subst `((g2-prop
+                      ,(if unforced-hyps
+                           `(lambda ()
+                              (and (,name$prop)
+                                   ,@unforced-hyps))
+                         name$prop))
+                     (g2-dom (lambda () ,dom))
+                     (g2-rel (lambda () ,call))
+                     (g2-fn  (lambda (,(car fn-args))
+                               (,fn ,@fn-args)))))
+         (form
+          `(progn
+             (check-zify ,name0 ,fn0 ,dom ,ran ,props0 ,xhyps ,all-args ,var)
+             (check-arity ,fn ,(len fn-args))
+
+; Zfn proves its constraints for the local witness in the current theory,
+; where rules about DOM may force props it cannot relieve, for example v$prop
+; for (v-omega).  So we admit it in a minimal theory.
+
+             (encapsulate
+               ()
+               (local (in-theory (union-theories '(domain-0 subset-0 funp-0)
+                                                 (theory 'minimal-theory))))
+               (zfn ,name                                     ; name
+                    ,all-args                                 ; args
+                    ,(car fn-args)                            ; x
+                    ,name$y                                   ; y
+                    ,dom                                      ; bound
+                    (equal (equal ,name$y (,fn ,@fn-args)) t) ; u
+                    ))
+
+; As for zify, domain-NAME is a functional instance of a generic theorem, and
+; its constraints are proved here once for all the functional instances below.
+; Most of them follow by rewriting with zfn's theorems, as for zify.  But zfn's
+; NAME$domain-2 has the hypothesis u with the free variable NAME$y, which
+; rewriting cannot bind; for zfn's general u that hypothesis says that some
+; witness exists.  For zify2 the witness is always the value of fn, so we
+; first prove NAME$domain-2-better, which is NAME$domain-2 without that
+; hypothesis.  It is local since domain-NAME subsumes it.  We use a minimal
+; theory since the only prop in the obligations is (NAME$prop), so rules about
+; dom could force (zfc).
+
+             (encapsulate
+               ()
+               (local (defthm ,name$domain-2-better
+                        (implies (and (in ,(car fn-args) ,dom)
+                                      (force (,name$prop)))
+                                 (in ,(car fn-args) (domain ,call)))
+                        :hints (("Goal"
+                                 :use (:instance ,(packn (list name '$domain-2))
+                                                 (,name$y (,fn ,@fn-args)))
+                                 :in-theory (theory 'minimal-theory)))))
+               (defthm ,(prefix-symbol "DOMAIN-" name)
+                 (implies (and (force ,g2-prop-hyp)
+                               (force (zify2-prop)))
+                          (equal (domain ,call)
+                                 ,dom))
+                 :hints
+                 (("Goal" :by (:functional-instance
+                               domain-of-g2-fn-is-g2-dom
+                               ,@g2-subst)
+                   :in-theory (union-theories
+                               '(force zify2-prop
+                                       ,(packn (list name '$funp))
+                                       ,(packn (list name '$domain-1))
+                                       ,name$domain-2-better
+                                       ,(packn (list name '$chooses)))
+                               (theory 'minimal-theory))))))
+
+             (defthm ,(suffix-symbol (concatenate 'string
+                                                  "-IS-"
+                                                  (symbol-name fn))
+                                     name)
+               (implies (and (in ,(car fn-args) ,dom)
+                             (force (,name$prop))
+                             (force (zify2-prop))
+                             ,@hyps)
+                        (equal (apply ,call ,(car fn-args))
+                               (,fn ,@fn-args)))
+
+
+; Unlike zify, we need a hint: without one, the proof relies on NAME$chooses
+; matching the call of FN, which fails when the call is normalized, for
+; example (binary-+ n k) to (binary-+ k n).
+
+               :hints
+               (("Goal" :use (:functional-instance
+                              (:instance apply-g2-rel (x ,(car fn-args)))
+                              ,@g2-subst)
+                 :in-theory (union-theories '(force)
+                                            (theory 'minimal-theory)))))
+
+             (defthm ,(prefix-symbol "IN-" name)
+               (implies (and (force ,g2-prop-hyp)
+                             (force (zify2-prop)))
+                        (equal (in ,var ,call)
+                               (and (consp ,var)
+                                    (in (car ,var) ,dom)
+                                    (equal (cdr ,var)
+                                           (,fn (car ,var) ,@fn-params)))))
+               :hints
+               (("Goal" :use (:functional-instance
+                              (:instance in-g2-rel (p ,var))
+                              ,@g2-subst)
+                 :in-theory (union-theories '(force)
+                                            (theory 'minimal-theory)))))
+
+             ,@(and ran
+                    `((defthm ,(prefix-symbol "IMAGE-" name)
+                        (implies (and (force ,g2-prop-hyp)
+                                      (force (zify2-prop)))
+                                 (subset (image ,call) ,ran))
+                        :hints
+                        (("Goal" :by (:functional-instance
+                                      subset-image-g2-rel-g2-ran
+                                      ,@g2-subst
+                                      (g2-ran (lambda () ,ran))))))))
+             (value-triple ',name))))
+    (cond (verbose form)
+          (t `(with-output :off (:other-than error) :gag-mode nil
+                ,form)))))
+
+(defmacro zify2 (name fn &key dom ran props xhyps args (var 'p) verbose)
+
+; As for zify, except that :ran is optional: when supplied, we also prove
+; image-NAME, which requires fn to map dom into ran.
+
+  (declare (xargs :guard t)) ; see check-zify
+  (zify2-fn name fn dom ran props xhyps args var verbose))
+
 ; Now we test based on the example in zify-motivation.lisp.
 
 (defun fib (n)
@@ -314,9 +566,17 @@
 
 (zify zfib fib :dom (omega) :ran (omega))
 
+;; zify2
+(zify2 zfib2 fib :dom (omega) :ran (omega))
+
 (thmz (equal (map (zfib) '(0 1 2 3 4 5 6 7))
              '(0 1 1 2 3 5 8 13))
       :props (zify-prop zfib$prop))
+
+;; zify2
+(thmz (equal (map (zfib2) '(0 1 2 3 4 5 6 7))
+	     '(0 1 1 2 3 5 8 13))
+      :props (zify2-prop zfib2$prop))
 
 (defun map-fib (lst)
   (declare (xargs :guard (nat-listp lst)))
@@ -330,6 +590,13 @@
                   (map-fib lst)))
   :props (zify-prop zfib$prop))
 
+;; zify2
+(defthmz map-zfib2
+  (implies (nat-listp lst)
+	   (equal (map (zfib2) lst)
+		  (map-fib lst)))
+  :props (zify2-prop zfib2$prop))
+
 ; Another test of zify:
 
 (defun fact (n)
@@ -338,9 +605,17 @@
 
 (zify zfact fact :dom (omega) :ran (omega))
 
+;; zify2
+(zify2 zfact2 fact :dom (omega) :ran (omega))
+
 (thmz (equal (map (zfact) '(2 3 4 5))
              '(2 6 24 120))
       :props (zify-prop zfact$prop))
+
+;; zify2
+(thmz (equal (map (zfact2) '(2 3 4 5))
+             '(2 6 24 120))
+      :props (zify2-prop zfact2$prop))
 
 (defun map-fact (lst)
   (declare (xargs :guard (nat-listp lst)))
@@ -353,6 +628,13 @@
            (equal (map (zfact) lst)
                   (map-fact lst)))
   :props (zfact$prop zify-prop))
+
+;; zify2
+(defthmz map-of-fact2-is-map-fact
+  (implies (nat-listp lst)
+           (equal (map (zfact2) lst)
+                  (map-fact lst)))
+  :props (zfact2$prop zify2-prop))
 
 ; Now for a simpler example: the identity function.
 
