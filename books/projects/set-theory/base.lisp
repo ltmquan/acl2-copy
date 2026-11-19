@@ -668,7 +668,7 @@
 ; of u except not including x or y.  We want to introduce an ACL2 function f,
 ; such that the following properties hold.  Think of u as being Boolean and as
 ; having free occurrences of variables x and y, though that isn't necessary
-; (one can always conjgoin x=x and y=y to u); let zfn = (f . args); and think of
+; (one can always conjoin x=x and y=y to u); let zfn = (f . args); and think of
 ; bound as including the domain of zfn.
 
 ; (funp zfn)

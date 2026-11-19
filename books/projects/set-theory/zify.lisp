@@ -456,6 +456,13 @@
                     (equal (equal ,name$y (,fn ,@fn-args)) t) ; u
                     ))
 
+; Zfn leaves NAME$chooses enabled.  Its left-hand side is (equal y (fn x ...))
+; for any y, so it fires on equalities about fn everywhere and then forces
+; (NAME$prop).  NAME-is-FN below says the same thing safely, so we disable it;
+; the hints below that need it name it explicitly.
+
+             (in-theory (disable ,(packn (list name '$chooses))))
+
 ; As for zify, domain-NAME is a functional instance of a generic theorem, and
 ; its constraints are proved here once for all the functional instances below.
 ; Most of them follow by rewriting with zfn's theorems, as for zify.  But zfn's
@@ -643,6 +650,12 @@
       :ran (v-omega)
       :props (v$prop))
 
+;; zify2
+(zify2 identity-fun-sv-omega2 identity
+       :dom (v-omega)
+       :ran (v-omega)
+       :props (v$prop))
+
 ; Yet another example.
 
 (defun mirror (x)
@@ -653,6 +666,10 @@
 (prove-acl2p mirror)
 
 (zify zmirror mirror)
+
+;; zify2
+;; zify's :ran defaults to (acl2), so we supply it for the same image theorem.
+(zify2 zmirror2 mirror :ran (acl2))
 
 ; Here is an example with :args.
 
@@ -672,6 +689,10 @@
   :hints (("Goal" :in-theory (enable erase-atoms))))
 
 (zify zerase-atoms (erase-atoms tree lst))
+
+;; zify2
+;; (Named zerase-atoms-2, since zerase-atoms2 is used just below.)
+(zify2 zerase-atoms-2 (erase-atoms tree lst) :ran (acl2))
 
 ; Here is a somewhat silly variant of the zify call just above, which however
 ; illustrates the use of arguments in the second argument of zify.
@@ -696,7 +717,13 @@
 
   (local (zify zerase-atoms2 (erase-atoms2 tree lst d)
                :dom (int2 d (acl2))
-               :props (acl2$prop v$prop diff$prop))))
+               :props (acl2$prop v$prop diff$prop)))
+
+;; zify2
+  (local (zify2 zerase-atoms2-2 (erase-atoms2 tree lst d)
+                :dom (int2 d (acl2))
+                :ran (acl2)
+                :props (acl2$prop v$prop diff$prop))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Prodn, prodn*
@@ -914,8 +941,64 @@
   (zify*-fn name fn arity dom ran props xhyps params args var verbose fn*
             fn*-var fn*-dcls))
 
+;; zify2*
+
+(defun zify2*-fn (name fn arity dom ran props xhyps params args var verbose
+                       fn* fn*-var fn*-dcls)
+
+; As for zify*-fn, but calling zify2, and ran has no default.
+
+  (declare (xargs :guard t :mode :logic))
+  (let* ((fn* (or fn*
+                  (and (symbolp fn)
+                       (suffix-symbol "*" fn))))
+         (props (if (null dom)
+
+; This is the right default for the common case, where dom defaults to (acl2).
+
+                    (append '(v$prop acl2$prop) props)
+                  props))
+         (arity0 arity)
+         (arity (nfix arity0))
+         (dom (or dom `(prodn* ,arity (acl2))))
+         (args0 args)
+         (args (and (symbol-listp args0) args0))
+         (params0 params)
+         (params (and (symbol-listp params0) params))
+         (args-minus-params (set-difference-eq args params))
+         (fn*-args (cons fn*-var params)))
+    `(progn (check-zify* ,name ,fn ,arity0 ,dom ,ran ,props ,xhyps ,params0
+                         ,args0 ,verbose ,fn* ,fn*-var ,fn*-dcls)
+            (defun ,fn* ,fn*-args
+              ,@(and (true-listp fn*-dcls) fn*-dcls)
+              (,fn ,@(arglist-to-list-of-nths arity fn*-var nil)
+                   ,@params))
+            (zify2 ,name (,fn* ,@fn*-args)
+                   ,@(and dom (list :dom dom))
+                   ,@(and ran (list :ran ran))
+                   ,@(and props (list :props props))
+                   ,@(and xhyps (list :xhyps xhyps))
+                   ,@(and args-minus-params (list :args args-minus-params))
+                   ,@(and var (list :var var))
+                   ,@(and verbose (list :verbose verbose))))))
+
+(defmacro zify2* (name fn arity
+                       &key dom ran props xhyps params args (var 'p) verbose
+                       fn* (fn*-var 'du) fn*-dcls)
+
+; As for zify*, except that we call zify2, so :ran is optional: when supplied,
+; we also prove image-NAME.
+
+  (declare (xargs :guard (natp arity)))
+  (zify2*-fn name fn arity dom ran props xhyps params args var verbose fn*
+             fn*-var fn*-dcls))
+
 ; Test:
 (zify* zput-assoc* put-assoc 3)
+
+;; zify2
+;; (The default :fn*, put-assoc*, was introduced just above.)
+(zify2* zput-assoc2* put-assoc 3 :fn* put-assoc2* :ran (acl2))
 
 ; A trivial consequence:
 (thmz (implies (and (in x0 (acl2))
@@ -924,6 +1007,14 @@
                (equal (apply (zput-assoc*) (list x0 x1 x2))
                       (put-assoc x0 x1 x2)))
       :props (zput-assoc*$prop zify-prop v$prop acl2$prop))
+
+;; zify2
+(thmz (implies (and (in x0 (acl2))
+                    (in x1 (acl2))
+                    (in x2 (acl2)))
+               (equal (apply (zput-assoc2*) (list x0 x1 x2))
+                      (put-assoc x0 x1 x2)))
+      :props (zput-assoc2*$prop zify2-prop v$prop acl2$prop))
 
 ; More tests.
 
@@ -935,7 +1026,14 @@
 (zify* zf0* f0 3
        :props (prod2$prop domain$prop inverse$prop zfc))
 
+;; zify2
+(zify2* zf0-2* f0 3 :fn* f0-2* :ran (acl2)
+        :props (prod2$prop domain$prop inverse$prop zfc))
+
 (zify* zmirror* mirror 1)
+
+;; zify2
+(zify2* zmirror2* mirror 1 :fn* mirror2* :ran (acl2))
 
 ; Test fn returning an mv.
 
@@ -944,7 +1042,13 @@
 
 (zify zf1 f1)
 
+;; zify2
+(zify2 zf1-2 f1 :ran (acl2))
+
 (defun f2 (x y)
   (mv x y x))
 
 (zify* zf2* f2 2)
+
+;; zify2
+(zify2* zf2-2* f2 2 :fn* f2-2* :ran (acl2))
