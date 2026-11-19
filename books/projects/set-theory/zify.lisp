@@ -415,6 +415,8 @@
                       (suffix-symbol "$Y" name)))
          (name$domain-2-better (and (symbolp name)
                                    (packn (list name '$domain-2-better))))
+         (name$chooses-better (and (symbolp name)
+                                   (packn (list name '$chooses-better))))
          (all-args (append fn-params args))
          (call (cons name all-args))
          (hyps (and (true-listp xhyps)
@@ -470,7 +472,11 @@
 ; rewriting cannot bind; for zfn's general u that hypothesis says that some
 ; witness exists.  For zify2 the witness is always the value of fn, so we
 ; first prove NAME$domain-2-better, which is NAME$domain-2 without that
-; hypothesis.  It is local since domain-NAME subsumes it.  We use a minimal
+; hypothesis.  It is local since domain-NAME subsumes it.  Similarly, zfn's
+; NAME$chooses cannot rewrite when the call of NAME has arguments that the call
+; of fn does not, for example the :args, since they are then free in its first
+; hypothesis.  So we also prove NAME$chooses-better, with y bound to the value
+; of the call of NAME, locally since NAME-is-FN subsumes it.  We use a minimal
 ; theory since the only prop in the obligations is (NAME$prop), so rules about
 ; dom could force (zfc).
 
@@ -483,6 +489,16 @@
                         :hints (("Goal"
                                  :use (:instance ,(packn (list name '$domain-2))
                                                  (,name$y (,fn ,@fn-args)))
+                                 :in-theory (theory 'minimal-theory)))))
+               (local (defthm ,name$chooses-better
+                        (implies (and (in ,(car fn-args) (domain ,call))
+                                      (force (,name$prop)))
+                                 (equal (apply ,call ,(car fn-args))
+                                        (,fn ,@fn-args)))
+                        :hints (("Goal"
+                                 :use (:instance ,(packn (list name '$chooses))
+                                                 (,name$y (apply ,call
+                                                                 ,(car fn-args))))
                                  :in-theory (theory 'minimal-theory)))))
                (defthm ,(prefix-symbol "DOMAIN-" name)
                  (implies (and (force ,g2-prop-hyp)
@@ -498,7 +514,7 @@
                                        ,(packn (list name '$funp))
                                        ,(packn (list name '$domain-1))
                                        ,name$domain-2-better
-                                       ,(packn (list name '$chooses)))
+                                       ,name$chooses-better)
                                (theory 'minimal-theory))))))
 
              (defthm ,(suffix-symbol (concatenate 'string
