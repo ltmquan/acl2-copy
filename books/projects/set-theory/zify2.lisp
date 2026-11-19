@@ -32,9 +32,7 @@
 ;;; names, so the functional-instance obligations are zfn's NAME$funp,
 ;;; NAME$domain-1, NAME$domain-2 and NAME$chooses.  One difference: zfn's
 ;;; NAME$domain-2 has the hypothesis u, (equal (equal y (FN x ...)) t), which
-;;; always holds for some y, so we drop it here.  Its variable is g2-x, not x:
-;;; the computed hint in domain-NAME instantiates NAME$domain-2 at it, and a
-;;; parameter of FN named x would clash.
+;;; always holds for some y, so we drop it here.
 
 (encapsulate
   (((g2-prop) => *)
@@ -52,9 +50,9 @@
              (subset (domain (g2-rel))
                      (g2-dom))))
   (defthm g2-rel$domain-2
-    (implies (and (in g2-x (g2-dom))
+    (implies (and (in x (g2-dom))
                   (force (g2-prop)))
-             (in g2-x (domain (g2-rel)))))
+             (in x (domain (g2-rel)))))
   (defthm g2-rel$chooses
     (implies (and (equal (apply (g2-rel) x) y)
                   (in x (domain (g2-rel)))
@@ -147,6 +145,8 @@
                          (suffix-symbol "$PROP" name)))
          (name$y (and (symbolp name)
                       (suffix-symbol "$Y" name)))
+         (name$domain-2-better (and (symbolp name)
+                                   (packn (list name '$domain-2-better))))
          (all-args (append fn-params args))
          (call (cons name all-args))
          (hyps (and (true-listp xhyps)
@@ -188,31 +188,43 @@
                     (equal (equal ,name$y (,fn ,@fn-args)) t) ; u
                     ))
 
-             (defthm ,(prefix-symbol "DOMAIN-" name)
-               (implies (and (force ,g2-prop-hyp)
-                             (force (zify-prop)))
-                        (equal (domain ,call)
-                               ,dom))
+; As for zify, domain-NAME is a functional instance of a generic theorem, and
+; its constraints are proved here once for all the functional instances below.
+; Most of them follow by rewriting with zfn's theorems, as for zify.  But zfn's
+; NAME$domain-2 has the hypothesis u with the free variable NAME$y, which
+; rewriting cannot bind; for zfn's general u that hypothesis says that some
+; witness exists.  For zify2 the witness is always the value of fn, so we
+; first prove NAME$domain-2-better, which is NAME$domain-2 without that
+; hypothesis.  It is local since domain-NAME subsumes it.  We use a minimal
+; theory since the only prop in the obligations is (NAME$prop), so rules about
+; dom could force (zfc).
 
-; The constraints are proved here, once for all the functional instances
-; below.  We use a minimal theory since the hypothesis of NAME$domain-2 is
-; only (NAME$prop), so rules about DOM could force (zfc).  The obligation for
-; g2-rel$domain-2 needs zfn's NAME$domain-2 with its free y instantiated.
-
-               :hints
-               (("Goal" :by (:functional-instance
-                             domain-of-g2-fn-is-g2-dom
-                             ,@g2-subst)
-                :in-theory (union-theories
-                            '(force zify-prop
-                                    ,(packn (list name '$funp))
-                                    ,(packn (list name '$domain-1))
-                                    ,(packn (list name '$chooses)))
-                            (theory 'minimal-theory)))
-                (and stable-under-simplificationp
-                     '(:use (:instance ,(packn (list name '$domain-2))
-                                       (,(car fn-args) g2-x)
-                                       (,name$y (,fn g2-x ,@fn-params)))))))
+             (encapsulate
+               ()
+               (local (defthm ,name$domain-2-better
+                        (implies (and (in ,(car fn-args) ,dom)
+                                      (force (,name$prop)))
+                                 (in ,(car fn-args) (domain ,call)))
+                        :hints (("Goal"
+                                 :use (:instance ,(packn (list name '$domain-2))
+                                                 (,name$y (,fn ,@fn-args)))
+                                 :in-theory (theory 'minimal-theory)))))
+               (defthm ,(prefix-symbol "DOMAIN-" name)
+                 (implies (and (force ,g2-prop-hyp)
+                               (force (zify-prop)))
+                          (equal (domain ,call)
+                                 ,dom))
+                 :hints
+                 (("Goal" :by (:functional-instance
+                               domain-of-g2-fn-is-g2-dom
+                               ,@g2-subst)
+                   :in-theory (union-theories
+                               '(force zify-prop
+                                       ,(packn (list name '$funp))
+                                       ,(packn (list name '$domain-1))
+                                       ,name$domain-2-better
+                                       ,(packn (list name '$chooses)))
+                               (theory 'minimal-theory))))))
 
              (defthm ,(suffix-symbol (concatenate 'string
                                                   "-IS-"
