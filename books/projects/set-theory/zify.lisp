@@ -343,13 +343,13 @@
 
 (defthm domain-of-g2-fn-is-g2-dom
   (implies (and (force (g2-prop))
-		(force (zify2-prop)))
+		(force (zify-prop)))
            (equal (domain (g2-rel))
 		  (g2-dom)))
   :hints (("Goal" :in-theory (enable extensionality-rewrite subset))))
 
 (defthm in-g2-rel
-  (implies (and (force (zify2-prop))
+  (implies (and (force (zify-prop))
 		(g2-prop))
            (equal (in p (g2-rel))
 		  (and (consp p)
@@ -364,7 +364,7 @@
   (defthm g2-image-is-image
     (implies (and (in x (g2-dom))
 		  (g2-prop)
-		  (force (zify2-prop)))
+		  (force (zify-prop)))
              (in (g2-fn x) (g2-ran)))
     :hints (("Goal" :use ((:instance in-apply-image (r (g2-rel))))))))
 
@@ -373,15 +373,24 @@
   (implies (and (equal y (g2-fn x))
 		(in x (g2-dom))
 		(g2-prop)
-		(force (zify2-prop)))
+		(force (zify-prop)))
            (in y (g2-ran))))
 
 (defthm subset-image-g2-rel-g2-ran
   (implies (and (force (g2-prop))
-		(force (zify2-prop)))
+		(force (zify-prop)))
            (subset (image (g2-rel))
 		   (g2-ran)))
   :hints (("Goal" :in-theory (enable subset in-image-rewrite))))
+
+;; in-g2-rel in the form of zsub's NAME$comprehension for zify, for when a
+;; codomain is given: the pair is in the product of the domain and codomain.
+(defthm in-g2-rel-with-ran
+  (implies (and (force (g2-prop))
+                (force (zify-prop)))
+           (equal (in p (g2-rel))
+                  (and (in p (prod2 (g2-dom) (g2-ran)))
+                       (equal (cdr p) (g2-fn (car p)))))))
 
 (defun zify2-fn (name fn dom ran props xhyps args var verbose)
   (declare (xargs :guard t))
@@ -502,7 +511,7 @@
                                  :in-theory (theory 'minimal-theory)))))
                (defthm ,(prefix-symbol "DOMAIN-" name)
                  (implies (and (force ,g2-prop-hyp)
-                               (force (zify2-prop)))
+                               (force (zify-prop)))
                           (equal (domain ,call)
                                  ,dom))
                  :hints
@@ -510,7 +519,7 @@
                                domain-of-g2-fn-is-g2-dom
                                ,@g2-subst)
                    :in-theory (union-theories
-                               '(force zify2-prop
+                               '(force zify-prop
                                        ,(packn (list name '$funp))
                                        ,(packn (list name '$domain-1))
                                        ,name$domain-2-better
@@ -523,7 +532,7 @@
                                      name)
                (implies (and (in ,(car fn-args) ,dom)
                              (force (,name$prop))
-                             (force (zify2-prop))
+                             (force (zify-prop))
                              ,@hyps)
                         (equal (apply ,call ,(car fn-args))
                                (,fn ,@fn-args)))
@@ -540,31 +549,42 @@
                  :in-theory (union-theories '(force)
                                             (theory 'minimal-theory)))))
 
-             (defthm ,(prefix-symbol "IN-" name)
-               (implies (and (force ,g2-prop-hyp)
-                             (force (zify2-prop)))
-                        (equal (in ,var ,call)
-                               (and (consp ,var)
-                                    (in (car ,var) ,dom)
-                                    (equal (cdr ,var)
-                                           (,fn (car ,var) ,@fn-params)))))
-               :hints
-               (("Goal" :use (:functional-instance
-                              (:instance in-g2-rel (p ,var))
-                              ,@g2-subst)
-                 :in-theory (union-theories '(force)
-                                            (theory 'minimal-theory)))))
-
              ,@(and ran
-                    `((defthm ,(prefix-symbol "IMAGE-" name)
+                    `((defthm ,(prefix-symbol "SUBSET-IMAGE-" name)
                         (implies (and (force ,g2-prop-hyp)
-                                      (force (zify2-prop)))
+                                      (force (zify-prop)))
                                  (subset (image ,call) ,ran))
                         :hints
                         (("Goal" :by (:functional-instance
                                       subset-image-g2-rel-g2-ran
                                       ,@g2-subst
                                       (g2-ran (lambda () ,ran))))))))
+
+; When a codomain is given, in-NAME has the form of zsub's NAME$comprehension
+; for zify, which is easier to use in rewriting: membership in the product
+; gives both (in (car p) dom) and (in (cdr p) ran).  It comes after
+; subset-image-NAME, whose proof discharges the codomain constraint.
+
+             (defthm ,(prefix-symbol "IN-" name)
+               (implies (and (force ,g2-prop-hyp)
+                             (force (zify-prop)))
+                        (equal (in ,var ,call)
+                               ,(if ran
+                                    `(and (in ,var (prod2 ,dom ,ran))
+                                          (equal (cdr ,var)
+                                                 (,fn (car ,var) ,@fn-params)))
+                                  `(and (consp ,var)
+                                        (in (car ,var) ,dom)
+                                        (equal (cdr ,var)
+                                               (,fn (car ,var) ,@fn-params))))))
+               :hints
+               (("Goal" :use (:functional-instance
+                              (:instance ,(if ran 'in-g2-rel-with-ran 'in-g2-rel)
+                                         (p ,var))
+                              ,@g2-subst
+                              ,@(and ran `((g2-ran (lambda () ,ran)))))
+                 :in-theory (union-theories '(force)
+                                            (theory 'minimal-theory)))))
              (value-triple ',name))))
     (cond (verbose form)
           (t `(with-output :off (:other-than error) :gag-mode nil
@@ -573,7 +593,7 @@
 (defmacro zify2 (name fn &key dom ran props xhyps args (var 'p) verbose)
 
 ; As for zify, except that :ran is optional: when supplied, we also prove
-; image-NAME, which requires fn to map dom into ran.
+; subset-image-NAME, which requires fn to map dom into ran.
 
   (declare (xargs :guard t)) ; see check-zify
   (zify2-fn name fn dom ran props xhyps args var verbose))
@@ -1003,7 +1023,7 @@
                        fn* (fn*-var 'du) fn*-dcls)
 
 ; As for zify*, except that we call zify2, so :ran is optional: when supplied,
-; we also prove image-NAME.
+; we also prove subset-image-NAME.
 
   (declare (xargs :guard (natp arity)))
   (zify2*-fn name fn arity dom ran props xhyps params args var verbose fn*
