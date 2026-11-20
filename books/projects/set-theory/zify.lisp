@@ -1088,3 +1088,89 @@
 
 ;; zify2
 (zify2* zf2-2* f2 2 :fn* f2-2* :ran (acl2))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; zify2 without :ran
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+; Zify2 needs a codomain only for subset-image-NAME, so these omit :ran, and
+; nothing is proved about where fn maps dom.
+
+(zify2 zfib2-nr fib :dom (omega))
+
+(thmz (equal (apply (zfib2-nr) 10) 55)
+      :props (zify2-prop zfib2-nr$prop))
+
+(thmz (equal (domain (zfib2-nr)) (omega))
+      :props (zify2-prop zfib2-nr$prop))
+
+; Without :ran, in-NAME has the general form.
+(thmz (in '(5 . 5) (zfib2-nr))
+      :props (zify2-prop zfib2-nr$prop))
+
+(zify2 zfact2-nr fact :dom (omega))
+
+(thmz (equal (map (zfact2-nr) '(2 3 4 5))
+             '(2 6 24 120))
+      :props (zify2-prop zfact2-nr$prop))
+
+; Default domain (acl2).
+(zify2 zmirror2-nr mirror)
+
+; A function with no acl2p theorem: zify could not zify it with its default
+; :ran (acl2) without one, but zify2 without :ran needs nothing about it.
+(defun mirror-no-acl2p (x)
+  (cond ((atom x) (list x))
+        (t (cons (mirror-no-acl2p (cdr x))
+                 (mirror-no-acl2p (car x))))))
+
+(zify2 zmirror-no-acl2p mirror-no-acl2p)
+
+(thmz (implies (in x (acl2))
+               (equal (apply (zmirror-no-acl2p) x)
+                      (mirror-no-acl2p x)))
+      :props (zify2-prop zmirror-no-acl2p$prop v$prop acl2$prop))
+
+; A parameter.
+(zify2 zerase-atoms-nr (erase-atoms tree lst))
+
+(thmz (implies (in tree (acl2))
+               (equal (apply (zerase-atoms-nr lst) tree)
+                      (erase-atoms tree lst)))
+      :props (zify2-prop zerase-atoms-nr$prop v$prop acl2$prop))
+
+; A parameter of fn in the domain, and a call that arithmetic normalizes.
+(zify2 zplus2-nr (binary-+ n k) :dom (omega))
+
+(thmz (implies (in n (omega))
+               (equal (apply (zplus2-nr k) n) (+ n k)))
+      :props (zify2-prop zplus2-nr$prop))
+
+; :args, where the domain is a variable, and :props.
+(zify2 identity-fun-nr identity :dom s :args (s))
+
+(thmz (equal (domain (identity-fun-nr s)) s)
+      :props (zify2-prop identity-fun-nr$prop))
+
+(zify2 identity-fun-sv-omega2-nr identity
+       :dom (v-omega)
+       :props (v$prop))
+
+; Multiple values.
+(zify2 zf1-2-nr f1)
+
+(thmz (implies (in x (acl2))
+               (equal (apply (zf1-2-nr) x) (list x x)))
+      :props (zify2-prop zf1-2-nr$prop v$prop acl2$prop))
+
+; Zify2*.
+(zify2* zput-assoc2*-nr put-assoc 3 :fn* put-assoc2*-nr)
+
+(thmz (implies (and (in x0 (acl2))
+                    (in x1 (acl2))
+                    (in x2 (acl2)))
+               (equal (apply (zput-assoc2*-nr) (list x0 x1 x2))
+                      (put-assoc x0 x1 x2)))
+      :props (zput-assoc2*-nr$prop zify2-prop v$prop acl2$prop))
+
+(zify2* zf2-2*-nr f2 2 :fn* f2-2*-nr)
