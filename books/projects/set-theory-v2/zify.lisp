@@ -47,59 +47,98 @@
 ;;; Zify
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+; Zify is built on zfn (Replacement), not zsub (Separation) as the original
+; zify in projects/set-theory is.  Zfn builds (NAME ...) from dom and fn alone,
+; so a codomain is needed only for subset-image-NAME.  The generic events below
+; follow zfn's constraint names, with (zify-prop) added as a hypothesis, just
+; as the original zify's generic-rel$comprehension adds it to zsub's
+; NAME$comprehension.
+
 (encapsulate
   (((generic-prop) => *)
    ((generic-dom) => *)
-   ((generic-ran) => *)
    ((generic-rel) => *)
    ((generic-fn *) => *))
   (local (defun generic-prop () nil))
   (local (defun generic-dom () 0))
-  (local (defun generic-ran () 0))
   (local (defun generic-rel () 0))
   (local (defun generic-fn (x) x))
-  (defthm generic-image-is-image
+  (defthm generic-rel$funp
+    (funp (generic-rel)))
+  (defthmz generic-rel$domain-1
+    (implies (force (domain$prop))
+             (subset (domain (generic-rel))
+		     (generic-dom))))
+  (defthm generic-rel$domain-2
     (implies (and (in x (generic-dom))
-                  (generic-prop)
-                  (force (zify-prop)))
-             (in (generic-fn x) (generic-ran))))
-  (defthm generic-rel$comprehension
-    (implies (and (force (zify-prop))
-                  (generic-prop))
-             (equal (in p (generic-rel))
-                    (and (in p (prod2 (generic-dom) (generic-ran)))
-                         (equal (cdr p) (generic-fn (car p))))))))
+		  (force (generic-prop))
+		  (force (zify-prop)))
+             (in x (domain (generic-rel)))))
+  (defthm generic-rel$chooses
+    (implies (and (equal (apply (generic-rel) x) y)
+		  (in x (domain (generic-rel)))
+		  (force (generic-prop))
+		  (force (zify-prop)))
+             (equal (equal y (generic-fn x)) t))))
 
-(defthm subset-domain-generic-rel-generic-dom
-  (implies (and (force (zify-prop))
-                (generic-prop))
-           (subset (domain (generic-rel))
-                   (generic-dom)))
-  :hints (("Goal" :in-theory (e/d (subset in-domain-rewrite)
-                                  (in-cons-apply)))))
-
-(defthm subset-generic-dom-domain-generic-rel-lemma
+(defthm apply-generic-rel
   (implies (and (in x (generic-dom))
-                (generic-prop)
+                (force (generic-prop))
                 (force (zify-prop)))
-           (in x (domain (generic-rel))))
-  :hints (("Goal" :use ((:instance generic-rel$comprehension
-                                   (p (cons x (generic-fn x)))))
-           :in-theory (disable generic-rel$comprehension))))
-
-(defthm subset-generic-dom-domain-generic-rel
-  (implies (and (generic-prop)
-                (force (zify-prop)))
-           (subset (generic-dom)
-                   (domain (generic-rel))))
-  :hints (("Goal" :in-theory (enable subset))))
+           (equal (apply (generic-rel) x)
+                  (generic-fn x))))
 
 (defthm domain-of-generic-fn-is-generic-dom
   (implies (and (force (generic-prop))
-                (force (zify-prop)))
+		(force (zify-prop)))
            (equal (domain (generic-rel))
-                  (generic-dom)))
-  :hints (("Goal" :in-theory (enable extensionality-rewrite))))
+		  (generic-dom)))
+  :hints (("Goal" :in-theory (enable extensionality-rewrite subset))))
+
+(defthm in-generic-rel
+  (implies (and (force (zify-prop))
+		(generic-prop))
+           (equal (in p (generic-rel))
+		  (and (consp p)
+		       (in (car p) (generic-dom))
+		       (equal (cdr p) (generic-fn (car p))))))
+  :hints (("Goal" :use ((:instance apply-intro
+				   (f (generic-rel)))))))
+
+(encapsulate
+  (((generic-ran) => *))
+  (local (defun generic-ran () (image (generic-rel))))
+  (defthm generic-image-is-image
+    (implies (and (in x (generic-dom))
+		  (generic-prop)
+		  (force (zify-prop)))
+             (in (generic-fn x) (generic-ran)))
+    :hints (("Goal" :use ((:instance in-apply-image (r (generic-rel))))))))
+
+;; this is the same as generic-image-is-image, but works better for the next theorem
+(defthm in-generic-ran
+  (implies (and (equal y (generic-fn x))
+		(in x (generic-dom))
+		(generic-prop)
+		(force (zify-prop)))
+           (in y (generic-ran))))
+
+(defthm subset-image-generic-rel-generic-ran
+  (implies (and (force (generic-prop))
+		(force (zify-prop)))
+           (subset (image (generic-rel))
+		   (generic-ran)))
+  :hints (("Goal" :in-theory (enable subset in-image-rewrite))))
+
+;; in-generic-rel in the form of zsub's NAME$comprehension, as used by the
+;; original zify, for when a codomain is given: the pair is in the product of
+;; the domain and codomain.
+(defthm in-generic-rel-with-ran
+  (implies (and (force (generic-prop))
+                (force (zify-prop)))
+           (equal (in p (generic-rel))
+                  (and (in p (prod2 (generic-dom) (generic-ran)))
+                       (equal (cdr p) (generic-fn (car p)))))))
 
 (defun check-arity-fn (fn arity ctx state)
   (declare (xargs :stobjs state
@@ -188,9 +227,6 @@
          (props (and (true-listp props)
                      props))
          (props (if (null dom)
-
-; This is the right default for the common case, where dom defaults to (acl2).
-
                     (append '(v$prop acl2$prop) props)
                   props))
          (fn-args (cond ((symbolp fn)
@@ -208,56 +244,123 @@
                     nil)))
          (fn-params (cdr fn-args))
          (dom (or dom '(acl2)))
-         (ran (or ran '(acl2)))
          (name$prop (and (symbolp name)
                          (suffix-symbol "$PROP" name)))
+         (name$y (and (symbolp name)
+                      (suffix-symbol "$Y" name)))
+         (name$domain-2-better (and (symbolp name)
+                                   (packn (list name '$domain-2-better))))
+         (name$chooses-better (and (symbolp name)
+                                   (packn (list name '$chooses-better))))
          (all-args (append fn-params args))
          (call (cons name all-args))
          (hyps (and (true-listp xhyps)
                     (append? (force-props props)
                              (pairlis-x1 'force (pairlis-x2 xhyps nil)))))
          (unforced-hyps (append? (props-to-hyps props) xhyps))
+         (generic-prop-hyp (if unforced-hyps
+                          `(and (,name$prop)
+                                ,@unforced-hyps)
+                        `(,name$prop)))
+         (generic-subst `((generic-prop
+                      ,(if unforced-hyps
+                           `(lambda ()
+                              (and (,name$prop)
+                                   ,@unforced-hyps))
+                         name$prop))
+                     (generic-dom (lambda () ,dom))
+                     (generic-rel (lambda () ,call))
+                     (generic-fn  (lambda (,(car fn-args))
+                               (,fn ,@fn-args)))))
          (form
           `(progn
              (check-zify ,name0 ,fn0 ,dom ,ran ,props0 ,xhyps ,all-args ,var)
              (check-arity ,fn ,(len fn-args))
 
-             (zsub ,name                                           ; name
-                   ,all-args                                       ; args
-                   ,var                                            ; x
-                   (prod2 ,dom ,ran)                              ; s
-                   (equal (cdr ,var) (,fn (car ,var) ,@fn-params)) ; u
-                   )
+; Zfn proves its constraints for the local witness in the current theory,
+; where rules about DOM may force props it cannot relieve, for example v$prop
+; for (v-omega).  So we admit it in a minimal theory.
 
-             (defthm ,(prefix-symbol "FUNP-" name)
-               (implies (and (force (,name$prop))
-                             (force (zify-prop))
-                             ,@hyps)
-                        (funp ,call))
-               :hints (("Goal" :in-theory (enable relation-p funp))))
+             (encapsulate
+               ()
+               (local (in-theory (union-theories '(domain-0 subset-0 funp-0)
+                                                 (theory 'minimal-theory))))
+               (zfn ,name                                     ; name
+                    ,all-args                                 ; args
+                    ,(car fn-args)                            ; x
+                    ,name$y                                   ; y
+                    ,dom                                      ; bound
+                    (equal (equal ,name$y (,fn ,@fn-args)) t) ; u
+                    ))
 
-             (defthm ,(prefix-symbol "DOMAIN-" name)
-               (implies (and (force ,(if unforced-hyps
-                                         `(and (,name$prop)
-                                               ,@unforced-hyps)
-                                       `(,name$prop)))
-                             (force (zify-prop)))
-                        (equal (domain ,call)
-                               ,dom))
-               :hints
-               (("Goal" :by (:functional-instance
-                             domain-of-generic-fn-is-generic-dom
-                             (generic-prop
-                              ,(if unforced-hyps
-                                   `(lambda ()
-                                      (and (,name$prop)
-                                           ,@unforced-hyps))
-                                 name$prop))
-                             (generic-dom (lambda () ,dom))
-                             (generic-ran (lambda () ,ran))
-                             (generic-rel (lambda () ,call))
-                             (generic-fn  (lambda (,(car fn-args))
-                                            (,fn ,@fn-args)))))))
+; Zfn leaves NAME$chooses enabled.  Its left-hand side is (equal y (fn x ...))
+; for any y, so it fires on equalities about fn everywhere and then forces
+; (NAME$prop).  NAME-is-FN below says the same thing safely, so we disable it;
+; the hints below that need it name it explicitly.
+
+             (in-theory (disable ,(packn (list name '$chooses))))
+
+; As in the original zify, domain-NAME is a functional instance of a generic
+; theorem, and its constraints are proved here once for all the functional
+; instances below.  Most of them follow by rewriting with zfn's theorems, as
+; the original zify's follow from zsub's NAME$comprehension.  But zfn's
+; NAME$domain-2 has the hypothesis u with the free variable NAME$y, which
+; rewriting cannot bind; for zfn's general u that hypothesis says that some
+; witness exists.  Here the witness is always the value of fn, so we
+; first prove NAME$domain-2-better, which is NAME$domain-2 without that
+; hypothesis.  It is local since domain-NAME subsumes it.  Similarly, zfn's
+; NAME$chooses cannot rewrite when the call of NAME has arguments that the call
+; of fn does not, for example the :args, since they are then free in its first
+; hypothesis.  So we also prove NAME$chooses-better, with y bound to the value
+; of the call of NAME, locally since NAME-is-FN subsumes it.
+
+; We prove domain-NAME in a minimal theory because of NAME$domain-1: its
+; left-hand side, (subset (domain (NAME ...)) dom), contains dom.  ACL2
+; rewrites the arguments of a term before trying rules on it, so in the
+; default theory dom may be rewritten first (for example, prodn-fn opens for
+; (prodn* 3 (acl2))), and then NAME$domain-1 no longer matches its obligation.
+; The original zify does not have this problem: its only rule about dom, zsub's
+; NAME$comprehension, has dom only on its right-hand side.  (The other
+; obligations would be fine in the default theory, since, as in the original
+; zify's generic-rel$comprehension, the constraints generic-rel$domain-2 and
+; generic-rel$chooses have (zify-prop) among their hypotheses, so props that
+; rules about dom force can be relieved.)
+
+             (encapsulate
+               ()
+               (local (defthm ,name$domain-2-better
+                        (implies (and (in ,(car fn-args) ,dom)
+                                      (force (,name$prop)))
+                                 (in ,(car fn-args) (domain ,call)))
+                        :hints (("Goal"
+                                 :use (:instance ,(packn (list name '$domain-2))
+                                                 (,name$y (,fn ,@fn-args)))
+                                 :in-theory (theory 'minimal-theory)))))
+               (local (defthm ,name$chooses-better
+                        (implies (and (in ,(car fn-args) (domain ,call))
+                                      (force (,name$prop)))
+                                 (equal (apply ,call ,(car fn-args))
+                                        (,fn ,@fn-args)))
+                        :hints (("Goal"
+                                 :use (:instance ,(packn (list name '$chooses))
+                                                 (,name$y (apply ,call
+                                                                 ,(car fn-args))))
+                                 :in-theory (theory 'minimal-theory)))))
+               (defthm ,(prefix-symbol "DOMAIN-" name)
+                 (implies (and (force ,generic-prop-hyp)
+                               (force (zify-prop)))
+                          (equal (domain ,call)
+                                 ,dom))
+                 :hints
+                 (("Goal" :by (:functional-instance
+                               domain-of-generic-fn-is-generic-dom
+                               ,@generic-subst)
+                   :in-theory (union-theories
+                               '(,(packn (list name '$funp))
+                                 ,(packn (list name '$domain-1))
+                                 ,name$domain-2-better
+                                 ,name$chooses-better)
+                               (theory 'minimal-theory))))))
 
              (defthm ,(suffix-symbol (concatenate 'string
                                                   "-IS-"
@@ -268,7 +371,58 @@
                              (force (zify-prop))
                              ,@hyps)
                         (equal (apply ,call ,(car fn-args))
-                               (,fn ,@fn-args))))
+                               (,fn ,@fn-args)))
+
+
+; Unlike the original zify, we need a hint: without one, the proof relies on
+; NAME$chooses
+; matching the call of FN, which fails when the call is normalized, for
+; example (binary-+ n k) to (binary-+ k n).
+
+               :hints
+               (("Goal" :use (:functional-instance
+                              (:instance apply-generic-rel (x ,(car fn-args)))
+                              ,@generic-subst)
+                 :in-theory (union-theories '(force)
+                                            (theory 'minimal-theory)))))
+
+             ,@(and ran
+                    `((defthm ,(prefix-symbol "SUBSET-IMAGE-" name)
+                        (implies (and (force ,generic-prop-hyp)
+                                      (force (zify-prop)))
+                                 (subset (image ,call) ,ran))
+                        :hints
+                        (("Goal" :by (:functional-instance
+                                      subset-image-generic-rel-generic-ran
+                                      ,@generic-subst
+                                      (generic-ran (lambda () ,ran))))))))
+
+; When a codomain is given, in-NAME has the form of zsub's NAME$comprehension,
+; as for the original zify, which is easier to use in rewriting: membership in
+; the product
+; gives both (in (car p) dom) and (in (cdr p) ran).  It comes after
+; subset-image-NAME, whose proof discharges the codomain constraint.
+
+             (defthm ,(prefix-symbol "IN-" name)
+               (implies (and (force ,generic-prop-hyp)
+                             (force (zify-prop)))
+                        (equal (in ,var ,call)
+                               ,(if ran
+                                    `(and (in ,var (prod2 ,dom ,ran))
+                                          (equal (cdr ,var)
+                                                 (,fn (car ,var) ,@fn-params)))
+                                  `(and (consp ,var)
+                                        (in (car ,var) ,dom)
+                                        (equal (cdr ,var)
+                                               (,fn (car ,var) ,@fn-params))))))
+               :hints
+               (("Goal" :use (:functional-instance
+                              (:instance ,(if ran 'in-generic-rel-with-ran 'in-generic-rel)
+                                         (p ,var))
+                              ,@generic-subst
+                              ,@(and ran `((generic-ran (lambda () ,ran)))))
+                 :in-theory (union-theories '(force)
+                                            (theory 'minimal-theory)))))
              (value-triple ',name))))
     (cond (verbose form)
           (t `(with-output :off (:other-than error) :gag-mode nil
@@ -280,25 +434,14 @@
 ; vi are distinct variables and k is the arity of the ACL2 function symbol, fn.
 ; We define a function, name, that is the set-theoretic realization of fn
 ; viewed as a function of its first argument, the other arguments being
-; considered as parameters, whose domain and codomain (range) are specified as
-; dom and ran.  More precisely, (name . args) is that function if fn is a
-; symbol, and otherwise (name v2 ... vk . args) is that function.
+; considered as parameters, with domain dom.  More precisely, (name . args) is
+; that function if fn is a symbol, and otherwise (name v2 ... vk . args) is
+; that function.
 
-; The keyword arguments are optional.  Dom and ran default to (acl2) and the
-; others default to nil.  Args contains all variables occurring free in dom or
-; ran.  Props is a list of additional hypotheses as zero-ary functions, under
-; which the desired properties are to hold, in addition to the hypotheses of
-; (name$prop) and (zify-prop).  Xhyps is a list of untranslated terms to be
-; added to the hypothese generated from props.  Verbose defeats the default
-; behavior of inhibiting non-error output from zify.
-
-; Note that the functional instantiation of
-; domain-of-generic-fn-is-generic-dom (shown below) requires a proof that the
-; domain of the generated function is indeed dom, which is only the case if fn
-; maps dom into ran.
-
-; Note that the variable p mustn't occur free in dom or ran.  This is enforced
-; by zsub.
+; The keyword arguments are as for the original zify, except that :ran is
+; optional and has no default: when supplied, we also prove subset-image-NAME,
+; which requires fn to map dom into ran.  Without :ran, nothing needs to be
+; proved about fn.
 
   (declare (xargs :guard t)) ; see check-zify
   (zify-fn name fn dom ran props xhyps args var verbose))
@@ -562,8 +705,11 @@
   (equal (true-listp (arglist-to-list-of-nths k x acc))
          (true-listp acc)))
 
-(defun zify*-fn (name fn arity dom ran props xhyps params args var verbose fn*
-                      fn*-var fn*-dcls)
+(defun zify*-fn (name fn arity dom ran props xhyps params args var verbose
+                       fn* fn*-var fn*-dcls)
+
+; As for the original zify*-fn, except that ran has no default.
+
   (declare (xargs :guard t :mode :logic))
   (let* ((fn* (or fn*
                   (and (symbolp fn)
@@ -577,7 +723,6 @@
          (arity0 arity)
          (arity (nfix arity0))
          (dom (or dom `(prodn* ,arity (acl2))))
-         (ran (or ran '(acl2)))
          (args0 args)
          (args (and (symbol-listp args0) args0))
          (params0 params)
@@ -591,17 +736,17 @@
               (,fn ,@(arglist-to-list-of-nths arity fn*-var nil)
                    ,@params))
             (zify ,name (,fn* ,@fn*-args)
-                  ,@(and dom (list :dom dom))
-                  ,@(and ran (list :ran ran))
-                  ,@(and props (list :props props))
-                  ,@(and xhyps (list :xhyps xhyps))
-                  ,@(and args-minus-params (list :args args-minus-params))
-                  ,@(and var (list :var var))
-                  ,@(and verbose (list :verbose verbose))))))
+                   ,@(and dom (list :dom dom))
+                   ,@(and ran (list :ran ran))
+                   ,@(and props (list :props props))
+                   ,@(and xhyps (list :xhyps xhyps))
+                   ,@(and args-minus-params (list :args args-minus-params))
+                   ,@(and var (list :var var))
+                   ,@(and verbose (list :verbose verbose))))))
 
 (defmacro zify* (name fn arity
-                      &key dom ran props xhyps params args (var 'p) verbose
-                      fn* (fn*-var 'du) fn*-dcls)
+                       &key dom ran props xhyps params args (var 'p) verbose
+                       fn* (fn*-var 'du) fn*-dcls)
 
 ; Summary.
 
@@ -614,15 +759,15 @@
 ; Details.
 
 ; Fn is an ACL2 function symbol with the given arity.  We define a function,
-; name, that is the set-theoretic realization of fn, whose domain is dom and
-; image is contained in ran.  Dom defaults to the arity-fold product of
-; (acl2) and should be a set of true lists, each of length arity, corresponding
-; to the valid argument lists for fn.  For example, if fn has arity 2 and name
-; is intended to take any two natural numbers i < j, then dom would contain all
-; lists (i j) ranging over natural numbers i < j.  Ran defaults to (acl2) and
-; should contain the values of fn for argument lists in dom.  We want name to
-; correspond logically to fn over dom, so if fn returns (mv v1 ... vk) we think
-; of fn as returning (list v1 ... vk).
+; name, that is the set-theoretic realization of fn, whose domain is dom.  Dom
+; defaults to the arity-fold product of (acl2) and should be a set of true
+; lists, each of length arity, corresponding to the valid argument lists for
+; fn.  For example, if fn has arity 2 and name is intended to take any two
+; natural numbers i < j, then dom would contain all lists (i j) ranging over
+; natural numbers i < j.  Ran is optional, as for zify: when supplied, it
+; should contain the values of fn for argument lists in dom, and we also prove
+; subset-image-NAME.  We want name to correspond logically to fn over dom, so
+; if fn returns (mv v1 ... vk) we think of fn as returning (list v1 ... vk).
 
 ; The keyword arguments of zify* include those of zify but include fn*, which
 ; is the name of an auxiliary unary ACL2 function to be introduced whose value
@@ -630,7 +775,7 @@
 
   (declare (xargs :guard (natp arity)))
   (zify*-fn name fn arity dom ran props xhyps params args var verbose fn*
-            fn*-var fn*-dcls))
+             fn*-var fn*-dcls))
 
 ; Test:
 (zify* zput-assoc* put-assoc 3)
@@ -666,3 +811,98 @@
   (mv x y x))
 
 (zify* zf2* f2 2)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; zify without :ran
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+; Zify needs a codomain only for subset-image-NAME, so these omit :ran, and
+; nothing is proved about where fn maps dom.
+
+(zify zfib-nr fib :dom (omega))
+
+(thmz (equal (apply (zfib-nr) 10) 55)
+      :props (zify-prop zfib-nr$prop))
+
+(thmz (equal (domain (zfib-nr)) (omega))
+      :props (zify-prop zfib-nr$prop))
+
+; Without :ran, in-NAME has the general form.
+(thmz (in '(5 . 5) (zfib-nr))
+      :props (zify-prop zfib-nr$prop))
+
+(zify zfact-nr fact :dom (omega))
+
+(thmz (equal (map (zfact-nr) '(2 3 4 5))
+             '(2 6 24 120))
+      :props (zify-prop zfact-nr$prop))
+
+;; What this zify can do that the original cannot: zify a function without
+;; proving that it maps its domain into a codomain.  The original zify's :ran
+;; defaults to (acl2), so its tests of mirror and erase-atoms above need
+;; (prove-acl2p mirror) and acl2p-erase-atoms.  Here are copies of mirror and
+;; erase-atoms with no acl2p theorems, and zify without :ran needs nothing about
+;; them.
+
+(defun mirror-nr (x)
+  (cond ((atom x) x)
+        (t (cons (mirror-nr (cdr x))
+                 (mirror-nr (car x))))))
+
+(zify zmirror-nr mirror-nr)
+
+(thmz (implies (in x (acl2))
+               (equal (apply (zmirror-nr) x)
+                      (mirror-nr x)))
+      :props (zify-prop zmirror-nr$prop v$prop acl2$prop))
+
+(defun erase-atoms-nr (tree lst)
+  (declare (xargs :guard (true-listp lst)))
+  (cond ((atom tree)
+         (if (member-equal tree lst)
+             nil
+           tree))
+        (t (cons (erase-atoms-nr (car tree) lst)
+                 (erase-atoms-nr (cdr tree) lst)))))
+
+(zify zerase-atoms-nr (erase-atoms-nr tree lst))
+
+(thmz (implies (in tree (acl2))
+               (equal (apply (zerase-atoms-nr lst) tree)
+                      (erase-atoms-nr tree lst)))
+      :props (zify-prop zerase-atoms-nr$prop v$prop acl2$prop))
+
+; A parameter of fn in the domain, and a call that arithmetic normalizes.
+(zify zplus-nr (binary-+ n k) :dom (omega))
+
+(thmz (implies (in n (omega))
+               (equal (apply (zplus-nr k) n) (+ n k)))
+      :props (zify-prop zplus-nr$prop))
+
+; :args, where the domain is a variable, and :props.
+(zify identity-fun-nr identity :dom s :args (s))
+
+(thmz (equal (domain (identity-fun-nr s)) s)
+      :props (zify-prop identity-fun-nr$prop))
+
+(zify identity-fun-sv-omega-nr identity
+       :dom (v-omega)
+       :props (v$prop))
+
+; Multiple values.
+(zify zf1-nr f1)
+
+(thmz (implies (in x (acl2))
+               (equal (apply (zf1-nr) x) (list x x)))
+      :props (zify-prop zf1-nr$prop v$prop acl2$prop))
+
+; Zify*.
+(zify* zput-assoc*-nr put-assoc 3 :fn* put-assoc*-nr)
+
+(thmz (implies (and (in x0 (acl2))
+                    (in x1 (acl2))
+                    (in x2 (acl2)))
+               (equal (apply (zput-assoc*-nr) (list x0 x1 x2))
+                      (put-assoc x0 x1 x2)))
+      :props (zput-assoc*-nr$prop zify-prop v$prop acl2$prop))
+
+(zify* zf2*-nr f2 2 :fn* f2*-nr)

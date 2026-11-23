@@ -30,7 +30,7 @@
 (defthmz inverse-identity-fun
   (equal (inverse (identity-fun s))
          (identity-fun s))
-  :props (zfc identity-fun$prop prod2$prop inverse$prop)
+  :props (zfc identity-fun$prop prod2$prop inverse$prop domain$prop)
   :hints (("Goal" :in-theory (enable extensionality-rewrite))))
 
 (defthmz domain-identity-fun ; redundant
