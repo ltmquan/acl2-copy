@@ -22,13 +22,15 @@
 ; give calls of the same function.  For that reason the functions have
 ; neutral names, zq$1, zq$2, ....
 ;
-; This is a first draft.  The generated defun-sks have only defun-sk's default
-; rules; a uniform package of introduction and elimination rules is to be
-; designed on top (see NOTES.md).
+; The generated functions are introduced with def::un-skd from
+; coi/quantification: a defun-sk, disabled, with coi's rules and registration,
+; so that the hints quant::inst? and quant::skosimp can instantiate and
+; skolemize them automatically.
 
 (in-package "ZF")
 
 (include-book "base")
+(include-book "coi/quantification/quantification" :dir :system)
 
 ;;; Recognizing quantifiers
 
@@ -136,7 +138,7 @@
                               (zq-fresh-name 1 (strip-cdrs pending) wrld)))
                     (new-events
                      (and (not old)
-                          `((defun-sk ,name ,args
+                          `((def::un-skd ,name ,args
                               (,kind ,(if (cdr bound) bound (car bound))
                                      ,body-new))
                             (table zq-table ',key ',name)))))
@@ -241,3 +243,27 @@
 ; Shares zq$1 with in-union-q, since the exists is the same up to renaming.
 (assert-event (equal (acl2::body 'in-union-of-pair-q nil (w state))
                      '((lambda (z a) (zq$1 a z)) (pair u v) a)))
+
+;;; Experiments: quantified theorems written with forall and exists directly,
+;;; nested, proved with only coi's hints.
+
+; T1
+(thmzq (forall a (implies (in a x) (in a x)))
+       :hints ((quant::skosimp) (quant::inst?)))
+
+; T2: transitivity of subset, with the subsets written as quantifiers.
+(thmzq (implies (and (forall a (implies (in a x) (in a y)))
+                     (forall a (implies (in a y) (in a z))))
+                (forall a (implies (in a x) (in a z))))
+       :hints ((quant::skosimp) (quant::inst?)))
+
+; T3: forall over exists on both sides, with no union.
+(thmzq (implies (forall a (implies (in a x) (in a y)))
+                (forall b (implies (exists u (and (in b u) (in u x)))
+                                   (exists v (and (in b v) (in v y))))))
+       :hints ((quant::skosimp) (quant::inst?)))
+
+; T3 with union, through in-union-q.
+(thmzq (implies (forall a (implies (in a x) (in a y)))
+                (forall b (implies (in b (union x)) (in b (union y)))))
+       :hints ((quant::skosimp) (quant::inst?)))

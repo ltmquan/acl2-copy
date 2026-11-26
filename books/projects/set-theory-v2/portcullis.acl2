@@ -2,4 +2,11 @@
 ; Written by Matt Kaufmann
 ; License: A 3-clause BSD license.  See the LICENSE file distributed with ACL2.
 
+; The packages of coi/quantification (QUANT, and DEF and GENSYM from
+; coi/util), so that books here can include it and use def::un-sk and the
+; quant:: hints; certify-book reads a whole book before evaluating it, so these
+; packages must exist beforehand.
+(include-book "coi/util/portcullis" :dir :system)
+(include-book "coi/quantification/portcullis" :dir :system)
+
 (ld "package.lsp")
