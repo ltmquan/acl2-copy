@@ -20,7 +20,10 @@
 ; normalized by renaming its variables to a fixed pattern, to its function.
 ; So two quantified formulas that are the same up to renaming of variables
 ; give calls of the same function.  For that reason the functions have
-; neutral names, zq$1, zq$2, ....
+; neutral names, zq$1, zq$2, ....  A function defined with defunz whose body
+; is a single quantifier, such as subset, is entered in the table too, so a
+; later quantifier with the same formula becomes a call of it.  The table
+; guard checks every entry against the event that introduced its function.
 ;
 ; The generated functions are introduced with def::un-skd from
 ; coi/quantification: a defun-sk, disabled, with coi's rules and registration,
@@ -29,7 +32,6 @@
 
 (in-package "ZF")
 
-(include-book "base")
 (include-book "coi/quantification/quantification" :dir :system)
 
 ;;; Recognizing quantifiers
@@ -86,10 +88,57 @@
                   (zq-canonical-vars prefix (1+ n) (cdr vars))))))
 
 (defun zq-key (kind bound args tbody)
+
+; Tbody is the translated body, with calls of the functions for its inner
+; quantifiers.  The number of arguments is part of the key, since a function
+; defined with defunz may have formals that do not occur in its body.
+
   (declare (xargs :mode :program))
   (let ((alist (append (zq-canonical-vars 'zq-f 0 args)
                        (zq-canonical-vars 'zq-b 0 bound))))
-    (list kind (len bound) (acl2::sublis-var alist tbody))))
+    (list kind (len bound) (len args) (acl2::sublis-var alist tbody))))
+
+;;; While elaborating, an inner quantifier whose function does not exist yet is
+;;; represented by (zq-placeholder 'name (list args ...)), which translates
+;;; and keeps the variables.  Placeholders-to-calls then turns the translated
+;;; term into the one with real calls (name args ...), so that a key is
+;;; computed from the same term that the body of the function translates to,
+;;; as the table guard recomputes it.
+
+(defun zq-placeholder (name args)
+  (declare (ignore name args)
+           (xargs :guard t))
+  nil)
+
+(defun translated-list-elements (term)
+
+; Term is the translation of (list x1 ... xn); return (x1 ... xn).
+
+  (declare (xargs :mode :program))
+  (if (and (consp term) (eq (car term) 'cons))
+      (cons (cadr term) (translated-list-elements (caddr term)))
+    nil))
+
+(mutual-recursion
+ (defun placeholders-to-calls (term)
+   (declare (xargs :mode :program))
+   (cond ((or (acl2::variablep term) (acl2::fquotep term)) term)
+         ((and (eq (car term) 'zq-placeholder)
+               (acl2::quotep (cadr term)))
+          (cons (acl2::unquote (cadr term))
+                (placeholders-to-calls-lst
+                 (translated-list-elements (caddr term)))))
+         ((consp (car term)) ; lambda
+          (cons (list 'lambda (cadr (car term))
+                      (placeholders-to-calls (caddr (car term))))
+                (placeholders-to-calls-lst (cdr term))))
+         (t (cons (car term) (placeholders-to-calls-lst (cdr term))))))
+ (defun placeholders-to-calls-lst (terms)
+   (declare (xargs :mode :program))
+   (if (endp terms)
+       nil
+     (cons (placeholders-to-calls (car terms))
+           (placeholders-to-calls-lst (cdr terms))))))
 
 (defun zq-fresh-name (n taken wrld)
 
@@ -104,14 +153,115 @@
         (zq-fresh-name (1+ n) taken wrld)
       name)))
 
-(table zq-table nil nil)
+;;; The table guard.  As zfc-table-guard in base.lisp checks that an entry
+;;; names the event that its macro would produce, an entry
+;;;
+;;;   key -> (name args kind bvars body)
+;;;
+;;; is accepted only if
+;;;
+;;;   - key is the canonical key of the formula (kind bvars body) with
+;;;     arguments args, recomputed here from the translation of body, and
+;;;   - the event that introduced name-witness is exactly the encapsulate that
+;;;     (def::un-skd name args (kind bvars body)) produces through defun-sk.
+;;;     That encapsulate defines name and proves its -suff (or -necc) theorem,
+;;;     so name means exactly that formula.
+;;;
+;;; So no entry can map a quantified formula to a function that does not mean
+;;; it.  The comparison is with ACL2's own defun-sk-fn, given the keyword
+;;; arguments that def::un-skd passes to defun-sk.
+
+(mutual-recursion
+ (defun strip-with-output (x)
+
+; Remove with-output wrappers, which the stored events do not have.
+
+   (declare (xargs :mode :program))
+   (cond ((atom x) x)
+         ((eq (car x) 'with-output) (strip-with-output (car (last x))))
+         (t (strip-with-output-lst x))))
+ (defun strip-with-output-lst (x)
+   (declare (xargs :mode :program))
+   (if (atom x)
+       x
+     (cons (strip-with-output (car x)) (strip-with-output-lst (cdr x))))))
+
+(mutual-recursion
+ (defun find-witness-encapsulate (witness x)
+
+; The encapsulate in x whose signature introduces witness.
+
+   (declare (xargs :mode :program))
+   (cond ((atom x) nil)
+         ((and (eq (car x) 'encapsulate)
+               (consp (cdr x))
+               (consp (cadr x))
+               (consp (car (cadr x)))
+               (consp (car (car (cadr x))))
+               (eq (car (car (car (cadr x)))) witness))
+          x)
+         (t (find-witness-encapsulate-lst witness x))))
+ (defun find-witness-encapsulate-lst (witness x)
+   (declare (xargs :mode :program))
+   (if (atom x)
+       nil
+     (or (find-witness-encapsulate witness (car x))
+         (find-witness-encapsulate-lst witness (cdr x))))))
+
+(defun zq-witness-event (name args kind bvars body)
+
+; The encapsulate introducing name-witness that def::un-skd produces.
+
+  (declare (xargs :mode :program))
+  (let* ((witness (acl2::add-suffix name "-WITNESS"))
+         (thm (acl2::add-suffix name (if (eq kind 'exists) "-SUFF" "-NECC")))
+         (rest `((,kind ,bvars ,body) :skolem-name ,witness :thm-name ,thm)))
+    (find-witness-encapsulate
+     witness
+     (strip-with-output
+      (acl2::defun-sk-fn `(defun-sk ,name ,args ,@rest) name args rest)))))
+
+(defun zq-table-guard (key val wrld)
+  (declare (xargs :mode :program)) ; because of get-event
+  (case-match val
+    ((name args kind bvars body)
+     (and (symbolp name)
+          name
+          (symbol-listp args)
+          (no-duplicatesp-eq args)
+          (member-eq kind '(forall exists))
+          (or (and (symbolp bvars) bvars)
+              (and (symbol-listp bvars) (consp bvars)))
+          (let ((bound (if (symbolp bvars) (list bvars) bvars)))
+            (mv-let (erp tbody)
+              (acl2::translate-cmp body t nil t 'zq-table-guard wrld
+                                   (acl2::default-state-vars nil))
+              (and (not erp)
+                   (equal key (zq-key kind bound args tbody))
+                   (equal (zq-witness-event name args kind bvars body)
+                          (get-event (acl2::add-suffix name "-WITNESS")
+                                     wrld)))))))
+    (& nil)))
+
+(table zq-table nil nil
+       :guard (acl2::strict-table-guard (zq-table-guard key val world)))
+
+(defun zq-lookup (key pending wrld)
+  (declare (xargs :mode :program))
+  (or (cdr (assoc-equal key pending))
+      (car (cdr (assoc-equal key (table-alist 'zq-table wrld))))))
 
 ;;; The elaborator.  For a term x it returns (mv erp (list new ph pending
 ;;; events) state), where new is x with quantifiers replaced by calls, ph is x
-;;; with quantifiers replaced by placeholders (cons 'name (list args ...))
-;;; that translate and preserve the variables, pending is the alist of
+;;; with quantifiers replaced by placeholders, pending is the alist of
 ;;; canonical keys to names created so far, and events are the events
 ;;; creating them, innermost first.
+
+(defun zq-quant-events (name args kind bound body-new key)
+  (declare (xargs :mode :program))
+  (let ((bvars (if (cdr bound) bound (car bound))))
+    `((def::un-skd ,name ,args (,kind ,bvars ,body-new))
+      (table zq-table ',key '(,name ,args ,kind ,bvars ,body-new)))))
 
 (mutual-recursion
  (defun elab-q (x pending ctx wrld state)
@@ -127,25 +277,23 @@
                (body-ph (nth 1 r))
                (pending (nth 2 r))
                (events (nth 3 r)))
-           (er-let* ((tbody (acl2::translate body-ph t nil t ctx wrld state)))
-             (let* ((args (set-difference-eq (term-vars-in-order tbody nil)
+           (er-let* ((tbody-ph (acl2::translate body-ph t nil t ctx wrld
+                                                state)))
+             (let* ((tbody (placeholders-to-calls tbody-ph))
+                    (args (set-difference-eq (term-vars-in-order tbody nil)
                                              bound))
                     (key (zq-key kind bound args tbody))
-                    (old (or (cdr (assoc-equal key pending))
-                             (cdr (assoc-equal key
-                                               (table-alist 'zq-table wrld)))))
+                    (old (zq-lookup key pending wrld))
                     (name (or old
-                              (zq-fresh-name 1 (strip-cdrs pending) wrld)))
-                    (new-events
-                     (and (not old)
-                          `((def::un-skd ,name ,args
-                              (,kind ,(if (cdr bound) bound (car bound))
-                                     ,body-new))
-                            (table zq-table ',key ',name)))))
+                              (zq-fresh-name 1 (strip-cdrs pending) wrld))))
                (value (list (cons name args)
-                            `(cons ',name (list ,@args))
+                            `(zq-placeholder ',name (list ,@args))
                             (if old pending (acons key name pending))
-                            (append events new-events)))))))))
+                            (if old
+                                events
+                              (append events
+                                      (zq-quant-events name args kind bound
+                                                       body-new key)))))))))))
     (t (elab-q-lst x pending ctx wrld state))))
  (defun elab-q-lst (x pending ctx wrld state)
    (declare (xargs :mode :program :stobjs state))
@@ -166,13 +314,54 @@
   (er-let* ((r (elab-q term nil ctx (w state) state)))
     (value (cons (nth 0 r) (nth 3 r)))))
 
+(defun defunz-events (name args dcls body ctx state)
+
+; If body is a single quantifier, name itself is the defun-sk (with def::un-skd,
+; so it is registered with coi), and it is entered in zq-table unless its
+; formula is already there.  Otherwise name is defined by defun, with the
+; quantifiers in body elaborated.
+
+  (declare (xargs :mode :program :stobjs state))
+  (let ((wrld (w state)))
+    (cond
+     ((quant-form-p body)
+      (let ((kind (car body))
+            (bound (quant-bound-vars body)))
+        (cond
+         (dcls (er soft ctx
+                   "Declarations are not supported when the body is a ~
+                    quantifier, as for ~x0."
+                   name))
+         (t
+          (er-let* ((r (elab-q (caddr body) nil ctx wrld state)))
+            (let ((body-new (nth 0 r))
+                  (body-ph (nth 1 r))
+                  (events (nth 3 r)))
+              (er-let* ((tbody-ph (acl2::translate body-ph t nil t ctx wrld
+                                                   state)))
+                (let* ((key (zq-key kind bound args
+                                    (placeholders-to-calls tbody-ph)))
+                       (q-events (zq-quant-events name args kind bound
+                                                  body-new key)))
+                  (value (append events
+                                 (if (zq-lookup key (nth 2 r) wrld)
+                                     (list (car q-events))
+                                   q-events)))))))))))
+     (t
+      (er-let* ((pr (elab-quantifiers body ctx state)))
+        (value (append (cdr pr)
+                       `((defun ,name ,args ,@dcls ,(car pr))))))))))
+
 ;;; Macros using it (names provisional)
 
-(defmacro defunz (name args body)
+(defmacro defunz (name args &rest rest)
+
+; (defunz name args dcl ... dcl body)
+
   `(make-event
-    (er-let* ((pr (elab-quantifiers ',body 'defunz state)))
-      (value `(progn ,@(cdr pr)
-                     (defun ,',name ,',args ,(car pr)))))))
+    (er-let* ((evs (defunz-events ',name ',args ',(butlast rest 1)
+                     ',(car (last rest)) 'defunz state)))
+      (value (cons 'progn evs)))))
 
 (defmacro defthmzq (name term &rest args)
   `(make-event
@@ -180,90 +369,14 @@
       (value `(progn ,@(cdr pr)
                      (defthmz ,',name ,(car pr) ,@',args))))))
 
+(defmacro defthmdzq (name term &rest args)
+  `(make-event
+    (er-let* ((pr (elab-quantifiers ',term 'defthmdzq state)))
+      (value `(progn ,@(cdr pr)
+                     (defthmdz ,',name ,(car pr) ,@',args))))))
+
 (defmacro thmzq (term &rest args)
   `(make-event
     (er-let* ((pr (elab-quantifiers ',term 'thmzq state)))
       (value `(progn ,@(cdr pr)
                      (thmz ,(car pr) ,@',args))))))
-
-;;; Tests
-
-; One exists: the meaning of union, without in-in.  The proof relates the
-; generated function to in-in by their witnesses; the rule package to come
-; should make such hints unnecessary.
-(defthmzq in-union-q
-  (equal (in a (union x))
-         (exists y (and (in a y) (in y x))))
-  :hints (("Goal"
-           :in-theory (enable zq$1)
-           :use ((:instance in-in-suff (y (zq$1-witness a x)))
-                 (:instance zq$1-suff (y (in-in-witness a x)))))))
-
-; One forall.
-(defunz subset-q (x y)
-  (forall a (implies (in a x) (in a y))))
-
-; Same formula up to renaming of variables: shares the generated function.
-(defunz subset-q2 (s u)
-  (forall b (implies (in b s) (in b u))))
-
-(assert-event (equal (acl2::body 'subset-q nil (w state))
-                     '(zq$2 x y)))
-(assert-event (equal (acl2::body 'subset-q2 nil (w state))
-                     '(zq$2 s u)))
-
-; Several bound variables in one quantifier.
-(defunz funp-q (f)
-  (forall (p1 p2)
-          (implies (and (in p1 f)
-                        (in p2 f)
-                        (equal (car p1) (car p2)))
-                   (equal p1 p2))))
-
-; Nested: forall over exists, so two generated functions; the inner one has
-; the outer bound variable y among its arguments.  (Apply is not yet in the
-; core, so a stub stands in for it.)
-(defstub app (f x) t)
-
-(defunz surjective-q (f a b)
-  (forall y (implies (in y b)
-                     (exists x (and (in x a)
-                                    (equal (app f x) y))))))
-
-(assert-event (equal (acl2::body 'surjective-q nil (w state))
-                     '(zq$5 b a f)))
-(assert-event (equal (acl2::formals 'zq$4 (w state)) '(a f y)))
-(assert-event (equal (acl2::formals 'zq$5 (w state)) '(b a f)))
-
-; A quantifier under let: the let-bound variable is an argument.
-(defunz in-union-of-pair-q (a u v)
-  (let ((z (pair u v)))
-    (exists y (and (in a y) (in y z)))))
-
-; Shares zq$1 with in-union-q, since the exists is the same up to renaming.
-(assert-event (equal (acl2::body 'in-union-of-pair-q nil (w state))
-                     '((lambda (z a) (zq$1 a z)) (pair u v) a)))
-
-;;; Experiments: quantified theorems written with forall and exists directly,
-;;; nested, proved with only coi's hints.
-
-; T1
-(thmzq (forall a (implies (in a x) (in a x)))
-       :hints ((quant::skosimp) (quant::inst?)))
-
-; T2: transitivity of subset, with the subsets written as quantifiers.
-(thmzq (implies (and (forall a (implies (in a x) (in a y)))
-                     (forall a (implies (in a y) (in a z))))
-                (forall a (implies (in a x) (in a z))))
-       :hints ((quant::skosimp) (quant::inst?)))
-
-; T3: forall over exists on both sides, with no union.
-(thmzq (implies (forall a (implies (in a x) (in a y)))
-                (forall b (implies (exists u (and (in b u) (in u x)))
-                                   (exists v (and (in b v) (in v y))))))
-       :hints ((quant::skosimp) (quant::inst?)))
-
-; T3 with union, through in-union-q.
-(thmzq (implies (forall a (implies (in a x) (in a y)))
-                (forall b (implies (in b (union x)) (in b (union y)))))
-       :hints ((quant::skosimp) (quant::inst?)))

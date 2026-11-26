@@ -4,6 +4,11 @@
 
 (in-package "ZF")
 
+; Experiment: definitions here use defunz, and quantified statements use
+; forall and exists directly (see quantifiers.lisp), so there are no auxiliary
+; defun-sks such as Matt's in-in.
+(include-book "quantifiers")
+
 ;;; This is the core of Matt Kaufmann's projects/set-theory/base.lisp, kept as
 ;;; the starting point for a redesign (see NOTES.md): the Preliminaries
 ;;; (including thmz, defthmz and defthmdz), the Primitives (the axioms, and the
@@ -218,7 +223,7 @@
   (booleanp (in x y))
   :rule-classes :type-prescription)
 
-(defun-sk subset (x y)
+(defunz subset (x y)
   (forall a (implies (in a x)
                      (in a y))))
 
@@ -233,10 +238,10 @@
 ; This event is local to the surrounding encapsulate.
 (set-verify-guards-eagerness 0)
 
-(defun singleton (x) ; {x} = {x,x}
+(defunz singleton (x) ; {x} = {x,x}
   (pair x x))
 
-(defun union2 (x y) ; x U y = U{x,y}
+(defunz union2 (x y) ; x U y = U{x,y}
   (union (pair x y)))
 
 (defthmz min-in-1
@@ -259,13 +264,10 @@
          (or (equal a x)
              (equal a y))))
 
-(defun-sk in-in (a x)
-  (exists y (and (in a y)
-                 (in y x))))
-
-(defthmz in-union
+(defthmzq in-union
   (equal (in a (union x))
-         (in-in a x)))
+         (exists y (and (in a y)
+                        (in y x)))))
 
 (defthmz infinity
   (equal (in n (omega))
@@ -294,55 +296,55 @@
          (pair (singleton x)
                (pair x y))))
 
-(defun insert (x s) ; {x} U s
+(defunz insert (x s) ; {x} U s
   (union2 (singleton x) s))
 
-(defun ztriple (y z) ; {0,y,z}
+(defunz ztriple (y z) ; {0,y,z}
   (declare (xargs :guard (and (posp y)
                               (not (natp z)))))
   (insert 0 (pair y z)))
 
-(defun negative-int-as-ztriple (x)
+(defunz negative-int-as-ztriple (x)
   (declare (xargs :guard (and (integerp x)
                               (< x 0))))
   (ztriple 1 (cons (- x) 0)))
 
-(defun integer-as-ztriple (x)
+(defunz integer-as-ztriple (x)
   (declare (xargs :guard (integerp x)))
   (if (< x 0)
       (negative-int-as-ztriple x)
     x))
 
-(defun numerator-as-ztriple (x)
+(defunz numerator-as-ztriple (x)
   (declare (xargs :guard (rationalp x)))
   (integer-as-ztriple (numerator x)))
 
-(defun ratio-as-ztriple (x)
+(defunz ratio-as-ztriple (x)
   (declare (xargs :guard (and (rationalp x)
                               (not (integerp x)))))
   (ztriple 2 (cons (numerator-as-ztriple x) (denominator x))))
 
-(defun rational-as-ztriple (x)
+(defunz rational-as-ztriple (x)
   (declare (xargs :guard (rationalp x)))
   (if (integerp x)
       (integer-as-ztriple x)
     (ratio-as-ztriple x)))
 
-(defun complex-as-ztriple (x)
+(defunz complex-as-ztriple (x)
   (declare (xargs :guard (and (complex-rationalp x)
                               (not (rationalp x)))))
   (ztriple 3 (cons (rational-as-ztriple (realpart x))
                    (rational-as-ztriple (imagpart x)))))
 
-(defun character-as-ztriple (x)
+(defunz character-as-ztriple (x)
   (declare (xargs :guard (characterp x)))
   (ztriple 4 (cons (char-code x) 0)))
 
-(defun string-as-ztriple (x)
+(defunz string-as-ztriple (x)
   (declare (xargs :guard (stringp x)))
   (ztriple 5 (cons (make-listp0 (coerce x 'list)) 0)))
 
-(defun symbol-as-ztriple (x)
+(defunz symbol-as-ztriple (x)
   (declare (xargs :guard (symbolp x)))
   (ztriple 6 (cons (string-as-ztriple (symbol-package-name x))
                    (string-as-ztriple (symbol-name x)))))
