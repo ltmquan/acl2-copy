@@ -71,13 +71,13 @@
   :rule-classes nil)
 
 ; The same with the subsets written out; they become calls of subset.
-(thmzq (implies (and (forall a (implies (in a x) (in a y)))
+(thmz (implies (and (forall a (implies (in a x) (in a y)))
                      (forall a (implies (in a y) (in a z))))
                 (forall a (implies (in a x) (in a z))))
        :hints ((quant::skosimp) (quant::inst?)))
 
 ; Forall over exists on both sides, with no union.
-(thmzq (implies (subset x y)
+(thmz (implies (subset x y)
                 (forall b (implies (exists u (and (in b u) (in u x)))
                                    (exists v (and (in b v) (in v y))))))
        :hints ((quant::skosimp) (quant::inst?)))
@@ -207,3 +207,13 @@
 (assert-event
  (not (equal (acl2::body 'closed-1 nil (w state))
              (acl2::body 'closed-2 nil (w state)))))
+
+(defthmdz subset-union-elements
+  (implies (subset x y)
+           (forall b (implies (exists u (and (in b u) (in u x)))
+                              (exists v (and (in b v) (in v y))))))
+  :hints ((quant::skosimp) (quant::inst?)))
+
+(assert-event
+ (not (acl2::enabled-runep '(:rewrite subset-union-elements)
+                          (acl2::ens state) (w state))))

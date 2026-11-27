@@ -46,7 +46,8 @@
 ;   - in values that ACL2 prints as data rather than as terms, for example the
 ;     result of (acl2::formula 'in-union nil (w state)), and in :pe of a
 ;     generated function;
-;   - in the events that defunz, defthmzq and thmzq print when they run, which
+;   - in the events that defunz, defthmz, defthmdz and thmz print when they
+;     run, which
 ;     include the def::un-skd for each new zq$n.
 ;
 ; Each zq$n is a defun-sk for one quantified formula; :pe zq$n shows it, and
@@ -598,20 +599,14 @@
                      ',(car (last rest)) 'defunz state)))
       (value (cons 'progn evs)))))
 
-(defmacro defthmzq (name term &rest args)
-  `(make-event
-    (er-let* ((pr (elab-quantifiers ',term nil 'defthmzq state)))
-      (value `(progn ,@(cdr pr)
-                     (defthmz ,',name ,(car pr) ,@',args))))))
-
-(defmacro defthmdzq (name term &rest args)
-  `(make-event
-    (er-let* ((pr (elab-quantifiers ',term nil 'defthmdzq state)))
-      (value `(progn ,@(cdr pr)
-                     (defthmdz ,',name ,(car pr) ,@',args))))))
-
-(defmacro thmzq (term &rest args)
-  `(make-event
-    (er-let* ((pr (elab-quantifiers ',term nil 'thmzq state)))
-      (value `(progn ,@(cdr pr)
-                     (thmz ,(car pr) ,@',args))))))
+(mutual-recursion
+ (defun zq-has-quantifier (x)
+   (declare (xargs :mode :program))
+   (cond ((or (atom x) (eq (car x) 'quote)) nil)
+         ((quant-form-p x) t)
+         (t (zq-has-quantifier-lst x))))
+ (defun zq-has-quantifier-lst (x)
+   (declare (xargs :mode :program))
+   (and (consp x)
+        (or (zq-has-quantifier (car x))
+            (zq-has-quantifier-lst (cdr x))))))

@@ -149,17 +149,30 @@
                                  ,ev))
                 (t ev)))))))
 
+(defun thmz-quantifiers-fn (event)
+  (declare (xargs :mode :program))
+  (let ((pos (if (eq (car event) 'thmz) 1 2)))
+    (if (zq-has-quantifier (nth pos event))
+        `(make-event
+          (er-let* ((pr (elab-quantifiers ',(nth pos event) nil
+                                          ',(car event) state)))
+            (value (cons 'progn
+                         (append (cdr pr)
+                                 (list (thmz-fn (update-nth ,pos (car pr)
+                                                            ',event))))))))
+      (thmz-fn event))))
+
 (defmacro thmz (&whole ev &rest args)
   (declare (ignore args))
-  (thmz-fn ev))
+  (thmz-quantifiers-fn ev))
 
 (defmacro defthmz (&whole ev &rest args)
   (declare (ignore args))
-  (thmz-fn ev))
+  (thmz-quantifiers-fn ev))
 
 (defmacro defthmdz (&whole ev &rest args)
   (declare (ignore args))
-  (thmz-fn ev))
+  (thmz-quantifiers-fn ev))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Primitives
@@ -264,7 +277,7 @@
          (or (equal a x)
              (equal a y))))
 
-(defthmzq in-union
+(defthmz in-union
   (equal (in a (union x))
          (exists y (and (in a y)
                         (in y x)))))
