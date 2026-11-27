@@ -98,20 +98,24 @@
 ;  - the key of subset with the arguments swapped.
 (acl2::must-fail
  (table zq-table '(forall 1 2 (implies (in zq-b0 zq-f0) (in zq-b0 zq-f1)))
-        '(union2 (x y) forall a (implies (in a x) (in a y)))))
+        '(union2 (x y) forall a (implies (in a x) (in a y)) nil)))
 (acl2::must-fail
  (table zq-table '(exists 1 2 (if (in zq-f0 zq-b0) (in zq-b0 zq-f1) 'nil))
-        '(subset (x y) forall a (implies (in a x) (in a y)))))
+        '(subset (x y) forall a (implies (in a x) (in a y)) nil)))
 (acl2::must-fail
  (table zq-table '(exists 1 2 (if (in zq-f0 zq-b0) (in zq-b0 zq-f1) 'nil))
-        '(subset (a x) exists y (and (in a y) (in y x)))))
+        '(subset (a x) exists y (and (in a y) (in y x)) nil)))
 (acl2::must-fail
  (table zq-table '(forall 1 2 (implies (in zq-b0 zq-f1) (in zq-b0 zq-f0)))
-        '(subset (x y) forall a (implies (in a x) (in a y)))))
+        '(subset (x y) forall a (implies (in a x) (in a y)) nil)))
+(acl2::must-fail
+ (table zq-table '(forall 1 2 (implies (in zq-b0 zq-f0) (in zq-b0 zq-f1)))
+        '(subset (x y) forall a (implies (in a x) (in a y))
+                 ((declare (xargs :guard (consp x)))))))
 
 ; A correct entry is accepted (it is already present, so this is a no-op).
 (table zq-table '(forall 1 2 (implies (in zq-b0 zq-f0) (in zq-b0 zq-f1)))
-       '(subset (x y) forall a (implies (in a x) (in a y))))
+       '(subset (x y) forall a (implies (in a x) (in a y)) nil))
 
 ;;; Display: generated functions print as the quantifiers they stand for
 
@@ -148,7 +152,7 @@
 
 (assert-event
  (equal (zq-lookup '(forall 1 2 (implies (in zq-b0 zq-f0) (in zq-b0 zq-f1)))
-                   nil (w state))
+                   nil nil (w state))
         'subset2))
 
 (defunz all-subsets2 (x y)
@@ -159,3 +163,47 @@
  (equal (acl2::formula 'all-subsets2-necc nil (w state))
         '(implies (not (implies (in z x) (subset2 z y)))
                   (not (all-subsets2 x y)))))
+
+;;; Guards
+
+(defunz nth-has (n x)
+  (declare (xargs :guard (and (natp n) (true-listp x))))
+  (exists y (in y (nth n x))))
+
+(assert-event
+ (eq (acl2::symbol-class 'nth-has (w state)) :common-lisp-compliant))
+
+(defunz transitive-q (x)
+  (declare (xargs :guard t :verify-guards t))
+  (forall a (implies (in a x)
+                     (forall b (implies (in b a) (in b x))))))
+
+(assert-event
+ (let* ((wrld (w state))
+        (q (car (caddr (cadr (cadr (acl2::formula 'transitive-q-necc nil
+                                                     wrld)))))))
+   (and (eq (acl2::symbol-class 'transitive-q wrld) :common-lisp-compliant)
+        (eq (acl2::symbol-class q wrld) :common-lisp-compliant))))
+
+(defunz nonempty-consp (x)
+  (declare (xargs :guard (consp x)))
+  (exists y (in y x)))
+
+(defunz empty-q (x)
+  (declare (xargs :guard t :verify-guards t))
+  (not (exists y (in y x))))
+
+(assert-event
+ (and (not (equal (acl2::body 'empty-q nil (w state))
+                  '(not (nonempty-consp x))))
+      (eq (acl2::symbol-class 'empty-q (w state)) :common-lisp-compliant)))
+
+(defunz closed-1 ()
+  (not (forall x (exists y (in y x)))))
+
+(defunz closed-2 ()
+  (not (exists x (forall y (in y x)))))
+
+(assert-event
+ (not (equal (acl2::body 'closed-1 nil (w state))
+             (acl2::body 'closed-2 nil (w state)))))
