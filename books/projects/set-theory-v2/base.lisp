@@ -333,7 +333,7 @@
               name)
         (er-let* ((p (elab-zsub-parts body nil verify ctx wrld state)))
           (let* ((xv (cadr body))
-                 (key (zs-key args xv (nth 2 p) (nth 3 p)))
+                 (key (zs-key :zsub args xv (nth 2 p) (nth 3 p)))
                  (old (zs-lookup key (nth 4 p) wrld)))
             (pprogn
              (if old
@@ -346,6 +346,27 @@
              (value (append (nth 5 p)
                             `((zsub-define ,name ,args ,xv ,(nth 0 p)
                                            ,(nth 1 p))))))))))
+     ((zimg-form-p body)
+      (if dcls
+          (er soft ctx
+              "Declarations are not supported when the body is a zimg at ~
+               the top, as for ~x0."
+              name)
+        (er-let* ((p (elab-zsub-parts body nil verify ctx wrld state)))
+          (let* ((xv (cadr body))
+                 (key (zs-key :zimg args xv (nth 2 p) (nth 3 p)))
+                 (old (zs-lookup key (nth 4 p) wrld)))
+            (pprogn
+             (if old
+                 (acl2::warning$ ctx "Zq"
+                                 "~x0 is the same set as ~x1, up to renaming ~
+                                  of variables.  Sets with that formula will ~
+                                  now become calls of ~x0 instead of ~x1."
+                                 name old)
+               state)
+             (value (append (nth 5 p)
+                            (zimg-events name args xv (nth 0 p) (nth 1 p)
+                                         (nth 2 p) (nth 3 p)))))))))
      (t
       (er-let* ((pr (elab-quantifiers body verify ctx state)))
         (value (append (cdr pr)
@@ -687,6 +708,57 @@
             (t `(with-output :off (:other-than error) :gag-mode nil
                   ,ev))))))
 
+(defun zimg-form-and-prop (name args x a term)
+  (declare (xargs :mode :program))
+  (let* ((name$prop (suffix-symbol "$PROP" name))
+         (name$replacement (packn (list name '$replacement)))
+         (name$member (packn (list name '$member)))
+         (y (zimg-y x args)))
+    (mv `(encapsulate
+           (((,name$prop) => *)
+            ((,name ,@(make-list (len args) :initial-element '*)) => *))
+           (local (defun ,name$prop ()
+                    nil))
+           (local (defun-nx ,name ,args
+                    (declare (ignorable . ,args))
+                    (list (check-vars-not-free (,x) ,a)
+                          (let ((,x 0))
+                            (declare (ignorable ,x))
+                            ,term))))
+           (defthmd ,name$replacement
+             (implies (force (,name$prop))
+                      (equal (in ,y (,name . ,args))
+                             (,(zimg-exists-name name) ,y . ,args))))
+           (defthm ,name$member
+             (implies (and (in ,x ,a)
+                           (force (,name$prop)))
+                      (in ,term (,name . ,args)))))
+        name$prop)))
+
+(defun zimg-exists-ok (name args x a term wrld)
+
+  (declare (xargs :mode :program))
+  (let* ((y (zimg-y x args))
+         (qargs (cons y args)))
+    (mv-let (erp tbody)
+      (acl2::translate-cmp `(and (in ,x ,a) (equal ,y ,term)) t nil t
+                           'zimg-exists-ok wrld
+                           (acl2::default-state-vars nil))
+      (let ((pair (and (not erp)
+                       (assoc-equal (zq-key 'exists (list x) qargs tbody)
+                                    (table-alist 'zq-table wrld)))))
+        (and pair
+             (eq (nth 0 (cdr pair)) (zimg-exists-name name))
+             (equal (nth 1 (cdr pair)) qargs))))))
+
+(defmacro zimg-define (name args x a term)
+  (mv-let (form prop)
+    (zimg-form-and-prop name args x a term)
+    `(with-output :off (:other-than error) :gag-mode nil
+       (progn ,form
+              (table zfc-table ',prop '(zimg ,name ,args ,x ,a ,term))
+              (value-triple ',name)))))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Zfc-table
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -734,6 +806,12 @@
            (zsub-form-and-prop name args x a u)
            (and (eq key prop)
                 (equal form (get-event name world)))))
+        (('zimg name args x a term)
+         (mv-let (form prop)
+           (zimg-form-and-prop name args x a term)
+           (and (eq key prop)
+                (equal form (get-event name world))
+                (zimg-exists-ok name args x a term world))))
 
         (('and . props-calls)
          (let ((ev (get-event key world)))
