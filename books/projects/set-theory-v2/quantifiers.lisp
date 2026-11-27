@@ -163,18 +163,75 @@
      (cons (placeholders-to-calls (car terms))
            (placeholders-to-calls-lst (cdr terms))))))
 
-(defun zq-fresh-name (n taken wrld)
+(defun zq-fresh-name (prefix n taken wrld)
 
-; The first zq$n, n >= 1, that is not already a function or macro, nor among
-; the names taken by the current elaboration.
+; The first prefix followed by n, n >= 1, that is not already a function or
+; macro, nor among the names taken by the current elaboration.
 
   (declare (xargs :mode :program))
-  (let ((name (packn (list 'zq$ n))))
+  (let ((name (packn (list prefix n))))
     (if (or (member-eq name taken)
             (acl2::function-symbolp name wrld)
             (getpropc name 'acl2::macro-args nil wrld))
-        (zq-fresh-name (1+ n) taken wrld)
+        (zq-fresh-name prefix (1+ n) taken wrld)
       name)))
+
+(defun zsub-form-p (x)
+  (declare (xargs :guard t))
+  (and (true-listp x)
+       (eql (len x) 4)
+       (eq (car x) 'zsub)
+       (acl2::legal-variablep (cadr x))))
+
+(defun zs-key (args x ts tphi)
+  (declare (xargs :mode :program))
+  (let ((alist (append (zq-canonical-vars 'zq-f 0 args)
+                       (list (cons x 'zq-b0)))))
+    (list :zsub
+          (len args)
+          (acl2::sublis-var alist ts)
+          (acl2::sublis-var alist tphi))))
+
+(defun zs-entry-key (val wrld)
+
+  (declare (xargs :mode :program))
+  (case-match val
+    (('zsub & args x s u)
+     (mv-let (erp1 ts)
+       (acl2::translate-cmp s t nil t 'zs-entry-key wrld
+                            (acl2::default-state-vars nil))
+       (mv-let (erp2 tu)
+         (acl2::translate-cmp u t nil t 'zs-entry-key wrld
+                              (acl2::default-state-vars nil))
+         (and (not erp1)
+              (not erp2)
+              (zs-key args x ts tu)))))
+    (& nil)))
+
+(defun zs-lookup-table (key alist wrld)
+  (declare (xargs :mode :program))
+  (cond ((endp alist) nil)
+        ((and (consp (car alist))
+              (consp (cdar alist))
+              (eq (car (cdar alist)) 'zsub)
+              (equal (zs-entry-key (cdar alist) wrld) key))
+         (nth 1 (cdar alist)))
+        (t (zs-lookup-table key (cdr alist) wrld))))
+
+(defun zs-lookup (key pending wrld)
+
+  (declare (xargs :mode :program))
+  (or (cdr (assoc-equal key pending))
+      (zs-lookup-table key (table-alist 'zfc-table wrld) wrld)))
+
+(defun zq-theorem-props (term wrld)
+
+  (declare (xargs :mode :program))
+  (let ((keys (strip-cars (table-alist 'zfc-table wrld))))
+    (and keys
+         (intersection-eq keys
+                          (acl2::instantiable-ancestors
+                           (acl2::all-fnnames term) wrld nil)))))
 
 ;;; The table guard.  As zfc-table-guard in base.lisp checks that an entry
 ;;; names the event that its macro would produce, an entry
@@ -292,6 +349,14 @@
 ;;; does not capture them: (zq$1 a y), where zq$1 is (exists y (and (in a y)
 ;;; (in y x))), prints as (exists y1 (and (in a y1) (in y1 y))).
 
+(defun suffix-symbol-zq (suffix sym)
+
+  (declare (type string suffix)
+           (type symbol sym))
+  (fix-intern-in-pkg-of-sym
+   (concatenate 'string (symbol-name sym) suffix)
+   sym))
+
 (defun zq-display-guard (key val wrld)
 
 ; An entry name -> (formals kind bound tbody) is accepted only if zq-table,
@@ -301,6 +366,21 @@
 
   (declare (xargs :mode :program))
   (case-match val
+    ((formals :zsub x (ts tphi))
+     (let ((entry (cdr (assoc-eq (suffix-symbol-zq "$PROP" key)
+                                 (table-alist 'zfc-table wrld)))))
+       (case-match entry
+         (('zsub !key !formals !x s u)
+          (mv-let (erp1 ts2)
+            (acl2::translate-cmp s t nil t 'zq-display-guard wrld
+                                 (acl2::default-state-vars nil))
+            (mv-let (erp2 tu2)
+              (acl2::translate-cmp u t nil t 'zq-display-guard wrld
+                                   (acl2::default-state-vars nil))
+              (and (not erp1) (not erp2)
+                   (equal ts ts2)
+                   (equal tphi tu2)))))
+         (& nil))))
     ((formals kind bound tbody)
      (let ((pair (assoc-equal (zq-key kind bound formals tbody)
                               (table-alist 'zq-table wrld))))
@@ -345,17 +425,24 @@
                 (eql (len (car entry)) (len (cdr term))))
            (let* ((formals (nth 0 entry))
                   (kind (nth 1 entry))
-                  (bound (nth 2 entry))
+                  (bound (if (eq kind :zsub)
+                             (list (nth 2 entry))
+                           (nth 2 entry)))
                   (tbody (nth 3 entry))
                   (ren (zq-fresh-vars bound
                                       (acl2::all-vars1-lst (cdr term) nil)))
-                  (body (acl2::sublis-var
-                         (append ren (pairlis$ formals (cdr term)))
-                         tbody))
+                  (alist (append ren (pairlis$ formals (cdr term))))
                   (vars (strip-cdrs ren)))
-             (list kind
-                   (if (cdr vars) vars (car vars))
-                   (zq-display-term body tbl)))
+             (if (eq kind :zsub)
+                 (list 'zsub
+                       (car vars)
+                       (zq-display-term (acl2::sublis-var alist (car tbody))
+                                        tbl)
+                       (zq-display-term (acl2::sublis-var alist (cadr tbody))
+                                        tbl))
+               (list kind
+                     (if (cdr vars) vars (car vars))
+                     (zq-display-term (acl2::sublis-var alist tbody) tbl))))
          (cons (car term) (zq-display-term-lst (cdr term) tbl)))))))
  (defun zq-display-term-lst (terms tbl)
    (declare (xargs :mode :program))
@@ -426,7 +513,8 @@
                     (key (zq-key kind bound args tbody))
                     (old (zq-lookup key pending verify wrld))
                     (name (or old
-                              (zq-fresh-name 1 (strip-cdrs pending) wrld))))
+                              (zq-fresh-name 'zq$ 1 (strip-cdrs pending)
+                                             wrld))))
                (value
                 (list (cons name args)
                       `(zq-placeholder ',name (list ,@args))
@@ -444,7 +532,49 @@
                                       :common-lisp-compliant)))
                         (append events `((verify-guards ,old))))
                        (t events))))))))))
+    ((zsub-form-p x)
+     (er-let* ((p (elab-zsub-parts x pending verify ctx wrld state)))
+       (let* ((xv (cadr x))
+              (s-new (nth 0 p))
+              (phi-new (nth 1 p))
+              (ts (nth 2 p))
+              (tphi (nth 3 p))
+              (pending (nth 4 p))
+              (events (nth 5 p))
+              (args (set-difference-eq
+                     (term-list-vars-in-order (list ts tphi) nil)
+                     (list xv)))
+              (key (zs-key args xv ts tphi))
+              (old (zs-lookup key pending wrld))
+              (name (or old
+                        (zq-fresh-name 'zs$ 1 (strip-cdrs pending) wrld))))
+         (value
+          (list (cons name args)
+                `(zq-placeholder ',name (list ,@args))
+                (if old pending (acons key name pending))
+                (if old
+                    events
+                  (append events
+                          `((zsub-define ,name ,args ,xv ,s-new ,phi-new)
+                            (table zq-display-table ',name
+                                   '(,args :zsub ,xv (,ts ,tphi)))))))))))
     (t (elab-q-lst x pending verify ctx wrld state))))
+ (defun elab-zsub-parts (x pending verify ctx wrld state)
+
+   (declare (xargs :mode :program :stobjs state))
+   (let ((xv (cadr x)))
+     (er-let* ((r1 (elab-q (caddr x) pending verify ctx wrld state))
+               (r2 (elab-q (cadddr x) (nth 2 r1) verify ctx wrld state))
+               (ts-ph (acl2::translate (nth 1 r1) t nil t ctx wrld state))
+               (tphi-ph (acl2::translate (nth 1 r2) t nil t ctx wrld state)))
+       (let ((ts (placeholders-to-calls ts-ph))
+             (tphi (placeholders-to-calls tphi-ph)))
+         (if (member-eq xv (acl2::all-vars ts))
+             (er soft ctx
+                 "The variable ~x0 of ~x1 occurs free in its set ~x2."
+                 xv x (caddr x))
+           (value (list (nth 0 r1) (nth 0 r2) ts tphi (nth 2 r2)
+                        (append (nth 3 r1) (nth 3 r2)))))))))
  (defun elab-q-lst (x pending verify ctx wrld state)
    (declare (xargs :mode :program :stobjs state))
    (cond
@@ -470,6 +600,7 @@
    (declare (xargs :mode :program))
    (cond ((or (atom x) (eq (car x) 'quote)) nil)
          ((quant-form-p x) t)
+         ((zsub-form-p x) t)
          (t (zq-has-quantifier-lst x))))
  (defun zq-has-quantifier-lst (x)
    (declare (xargs :mode :program))

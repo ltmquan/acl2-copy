@@ -149,18 +149,51 @@
                                  ,ev))
                 (t ev)))))))
 
+(defun thmz-remove-props (args)
+  (declare (xargs :mode :program))
+  (cond ((or (endp args) (endp (cdr args))) args)
+        ((eq (car args) :props) (cddr args))
+        (t (list* (car args) (cadr args) (thmz-remove-props (cddr args))))))
+
+(defun thmz-props-event (event pos state)
+
+  (declare (xargs :mode :program :stobjs state))
+  (let* ((wrld (w state))
+         (args (nthcdr (1+ pos) event))
+         (tail (assoc-keyword :props args))
+         (user (cadr tail)))
+    (if (or (not (assoc-eq 'zfc (table-alist 'zfc-table wrld)))
+            (not (symbol-listp user)))
+        (value (thmz-fn event))
+      (er-let* ((tterm (acl2::translate (nth pos event) t t t (car event) wrld
+                                        state)))
+        (let* ((computed (zq-theorem-props tterm wrld))
+               (props (cons 'zfc
+                            (set-difference-eq
+                             (append user (set-difference-eq computed user))
+                             '(zfc)))))
+          (if (and (null tail) (equal props '(zfc)))
+              (value (thmz-fn event))
+            (value (thmz-fn (append (take (1+ pos) event)
+                                    (list :props props)
+                                    (thmz-remove-props args))))))))))
+
+(defun thmz-elaborate-event (event pos state)
+  (declare (xargs :mode :program :stobjs state))
+  (if (zq-has-quantifier (nth pos event))
+      (er-let* ((pr (elab-quantifiers (nth pos event) nil (car event) state)))
+        (let ((event2 (update-nth pos (car pr) event)))
+          (if (cdr pr)
+              (value `(progn ,@(cdr pr)
+                             (make-event
+                              (thmz-props-event ',event2 ,pos state))))
+            (thmz-props-event event2 pos state))))
+    (thmz-props-event event pos state)))
+
 (defun thmz-quantifiers-fn (event)
   (declare (xargs :mode :program))
   (let ((pos (if (eq (car event) 'thmz) 1 2)))
-    (if (zq-has-quantifier (nth pos event))
-        `(make-event
-          (er-let* ((pr (elab-quantifiers ',(nth pos event) nil
-                                          ',(car event) state)))
-            (value (cons 'progn
-                         (append (cdr pr)
-                                 (list (thmz-fn (update-nth ,pos (car pr)
-                                                            ',event))))))))
-      (thmz-fn event))))
+    `(make-event (thmz-elaborate-event ',event ,pos state))))
 
 (defmacro thmz (&whole ev &rest args)
   (declare (ignore args))
@@ -292,6 +325,27 @@
                                  (and verify
                                       (zq-verify-guards-event name items))
                                  nil))))))))))
+     ((zsub-form-p body)
+      (if dcls
+          (er soft ctx
+              "Declarations are not supported when the body is a zsub at ~
+               the top, as for ~x0."
+              name)
+        (er-let* ((p (elab-zsub-parts body nil verify ctx wrld state)))
+          (let* ((xv (cadr body))
+                 (key (zs-key args xv (nth 2 p) (nth 3 p)))
+                 (old (zs-lookup key (nth 4 p) wrld)))
+            (pprogn
+             (if old
+                 (acl2::warning$ ctx "Zq"
+                                 "~x0 is the same set as ~x1, up to renaming ~
+                                  of variables.  Sets with that formula will ~
+                                  now become calls of ~x0 instead of ~x1."
+                                 name old)
+               state)
+             (value (append (nth 5 p)
+                            `((zsub-define ,name ,args ,xv ,(nth 0 p)
+                                           ,(nth 1 p))))))))))
      (t
       (er-let* ((pr (elab-quantifiers body verify ctx state)))
         (value (append (cdr pr)
@@ -539,6 +593,101 @@
 )
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Scheme implementations:
+;;;   zsub (implementing Comprehension)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defun check-zsub-fn (name args x s u ctx state)
+  (declare (xargs :stobjs state :guard (error1-state-p state))
+           (ignore s u))
+  (cond
+   ((not (symbolp name))
+    (er soft ctx
+        "The first argument of ~x0 must be a symbol, but ~x1 is not."
+        'check-zsub name))
+   ((not (and (symbol-listp args)
+              (no-duplicatesp-eq args)))
+    (er soft ctx
+        "The second argument of ~x0 must be a duplicates-free list of symbols ~
+         but ~x1 is not."
+        'check-zsub args))
+   ((not (symbolp x))
+    (er soft ctx
+        "The third argument of ~x0 must be a symbol, but ~x1 is not."
+        'check-zsub x))
+   ((member-eq x args)
+    (er soft ctx
+        "The third argument of ~x0 must not be a member of the second ~
+         argument, but ~x1 is a member of ~x2."
+        'check-zsub x args))
+   (t (value nil))))
+
+(defmacro check-zsub (name args x s u)
+  `(make-event
+    (er-progn (check-zsub-fn ',name ',args ',x ',s ',u 'check-zsub state)
+              (value '(value-triple nil)))
+    :on-behalf-of :quiet
+    :check-expansion t
+    :expansion? (value-triple nil)))
+
+(defun zsub-form-and-prop (name args x s u)
+  (declare (xargs :guard t))
+  (let* ((name$prop (and (symbolp name)
+                         (suffix-symbol "$PROP" name)))
+         (name$comprehension (and (symbolp name)
+                                  (packn (list name '$comprehension)))))
+    (mv `(encapsulate
+           (((,name$prop) => *)
+            ((,name ,@(make-list (len args) :initial-element '*)) => *))
+           (check-zsub ,name ,args ,x ,s ,u)
+           (local (defun ,name$prop ()
+                    nil))
+           (local (defun-nx ,name ,args
+
+; We check that all free variables of a are among args, as are all free
+; variables of u other than x.  We also check that x does not occur free in a.
+; Note that we use defun-nx in case u is not well-formed with respect to
+; multiple-value checking.  We take advantage of this use of defun-nx in
+; examples involving mv near the end of zify.lisp.
+
+                    (declare (ignorable . ,args))
+                    (list (check-vars-not-free (,x) ,s)
+                          (let ((,x 0))
+                            (declare (ignorable ,x))
+                            ,u))))
+           (defthm ,name$comprehension
+             (implies (force (,name$prop))
+                      (equal (in ,x (,name . ,args))
+                             (and (in ,x ,s)
+                                  ,u)))))
+        name$prop)))
+
+(defmacro zsub-define (name args x s u &key verbose)
+
+; We introduce a set for {x \in s: u}.
+
+; Name is the name of a new function symbol.  X is a variable; s and u are
+; untranslated terms; and args is a true list of distinct variables containing
+; all the free variables of s and u except not including x.  We want to
+; introduce a function f such that:
+
+; x \in (name . args) <=> u & x \in s.
+
+; We require that x not be free in a; otherwise the equivalence above is not as
+; intended.  Of course we could in principle replace that prohibition by
+; renaming x in s, but that would be awkward since s is an untranslated term.
+
+  (declare (xargs :guard t))
+  (mv-let (form prop)
+    (zsub-form-and-prop name args x s u)
+    (let ((ev `(progn ,form
+                      (table zfc-table ',prop '(zsub ,name ,args ,x ,s ,u))
+                      (value-triple ',name))))
+      (cond (verbose ev)
+            (t `(with-output :off (:other-than error) :gag-mode nil
+                  ,ev))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Zfc-table
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -580,11 +729,11 @@
    ((immediately-encapsulated-in-pass-2-p key world)
     t)
    (t (case-match val
-
-; Matt's base.lisp also accepts entries justified by the scheme macros zsub
-; and zfn here, checking that the named event is the one the macro would
-; produce.  Those macros are to be redesigned, and their cases will come back
-; with them.
+        (('zsub name args x a u)
+         (mv-let (form prop)
+           (zsub-form-and-prop name args x a u)
+           (and (eq key prop)
+                (equal form (get-event name world)))))
 
         (('and . props-calls)
          (let ((ev (get-event key world)))
