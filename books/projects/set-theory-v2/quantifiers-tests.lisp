@@ -112,3 +112,30 @@
 ; A correct entry is accepted (it is already present, so this is a no-op).
 (table zq-table '(forall 1 2 (implies (in zq-b0 zq-f0) (in zq-b0 zq-f1)))
        '(subset (x y) forall a (implies (in a x) (in a y))))
+
+;;; Display: generated functions print as the quantifiers they stand for
+
+; Zq$1 is the exists of in-union.
+(assert-event
+ (equal (zq-untranslate-preprocess '(zq$1 a x) (w state))
+        '(exists y (if (in a y) (in y x) 'nil))))
+
+; The bound variable y is renamed, since it occurs in the arguments.
+(assert-event
+ (equal (zq-untranslate-preprocess '(zq$1 a y) (w state))
+        '(exists y1 (if (in a y1) (in y1 y) 'nil))))
+
+; Nested: surjective-q's inner exists, inside a term.
+(assert-event
+ (equal (zq-untranslate-preprocess '(not (zq$2 a f x)) (w state))
+        '(not (exists x1 (if (in x1 a) (equal (app f x1) x) 'nil)))))
+
+; Functions defined with defunz are not affected.
+(assert-event
+ (equal (zq-untranslate-preprocess '(subset x y) (w state)) nil))
+
+; The display table refuses an entry that would print a call as a formula the
+; function does not mean: zq$1 shown as a forall.
+(acl2::must-fail
+ (table zq-display-table 'zq$1
+        '((a x) forall (y) (if (in a y) (in y x) 'nil))))

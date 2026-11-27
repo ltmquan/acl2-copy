@@ -251,17 +251,118 @@
   (or (cdr (assoc-equal key pending))
       (car (cdr (assoc-equal key (table-alist 'zq-table wrld))))))
 
+;;; Display.  Generated functions should not show in proof output: a call
+;;; (zq$n a1 ... ak) is printed as the quantified formula it stands for, with
+;;; the arguments substituted.  Zq-display-table maps each generated function
+;;; to (formals kind bound tbody).  This affects printing only (see :DOC
+;;; user-defined-functions-table), not what is proved.
+;;;
+;;; A bound variable is renamed when it occurs in the arguments, so that it
+;;; does not capture them: (zq$1 a y), where zq$1 is (exists y (and (in a y)
+;;; (in y x))), prints as (exists y1 (and (in a y1) (in y1 y))).
+
+(defun zq-display-guard (key val wrld)
+
+; An entry name -> (formals kind bound tbody) is accepted only if zq-table,
+; whose entries are checked against their events, has an entry for name with
+; these formals and with the key of (kind bound formals tbody).  So a call of
+; name prints as the formula that name means.
+
+  (declare (xargs :mode :program))
+  (case-match val
+    ((formals kind bound tbody)
+     (let ((pair (assoc-equal (zq-key kind bound formals tbody)
+                              (table-alist 'zq-table wrld))))
+       (and pair
+            (eq (nth 0 (cdr pair)) key)
+            (equal (nth 1 (cdr pair)) formals))))
+    (& nil)))
+
+(table zq-display-table nil nil
+       :guard (acl2::strict-table-guard (zq-display-guard key val world)))
+
+(defun zq-fresh-var (v avoid n)
+  (declare (xargs :mode :program))
+  (let ((v2 (if (eql n 0) v (packn-pos (list v n) v))))
+    (if (member-eq v2 avoid)
+        (zq-fresh-var v avoid (1+ n))
+      v2)))
+
+(defun zq-fresh-vars (vars avoid)
+
+; Returns an alist mapping each of vars to a variable not in avoid, all
+; distinct.
+
+  (declare (xargs :mode :program))
+  (if (endp vars)
+      nil
+    (let ((v (zq-fresh-var (car vars) avoid 0)))
+      (acons (car vars) v (zq-fresh-vars (cdr vars) (cons v avoid))))))
+
+(mutual-recursion
+ (defun zq-display-term (term tbl)
+   (declare (xargs :mode :program))
+   (cond
+    ((or (acl2::variablep term) (acl2::fquotep term)) term)
+    ((consp (car term)) ; lambda
+     (cons (list 'lambda (cadr (car term))
+                 (zq-display-term (caddr (car term)) tbl))
+           (zq-display-term-lst (cdr term) tbl)))
+    (t
+     (let ((entry (cdr (assoc-eq (car term) tbl))))
+       (if (and entry
+                (eql (len (car entry)) (len (cdr term))))
+           (let* ((formals (nth 0 entry))
+                  (kind (nth 1 entry))
+                  (bound (nth 2 entry))
+                  (tbody (nth 3 entry))
+                  (ren (zq-fresh-vars bound
+                                      (acl2::all-vars1-lst (cdr term) nil)))
+                  (body (acl2::sublis-var
+                         (append ren (pairlis$ formals (cdr term)))
+                         tbody))
+                  (vars (strip-cdrs ren)))
+             (list kind
+                   (if (cdr vars) vars (car vars))
+                   (zq-display-term body tbl)))
+         (cons (car term) (zq-display-term-lst (cdr term) tbl)))))))
+ (defun zq-display-term-lst (terms tbl)
+   (declare (xargs :mode :program))
+   (if (endp terms)
+       nil
+     (cons (zq-display-term (car terms) tbl)
+           (zq-display-term-lst (cdr terms) tbl)))))
+
+(defun zq-untranslate-preprocess (term wrld)
+  (declare (xargs :mode :program))
+  (let ((tbl (table-alist 'zq-display-table wrld)))
+    (and tbl
+         (let ((new (zq-display-term term tbl)))
+           (and (not (equal new term))
+                new)))))
+
+(table acl2::user-defined-functions-table
+       'acl2::untranslate-preprocess
+       'zq-untranslate-preprocess)
+
 ;;; The elaborator.  For a term x it returns (mv erp (list new ph pending
 ;;; events) state), where new is x with quantifiers replaced by calls, ph is x
 ;;; with quantifiers replaced by placeholders, pending is the alist of
 ;;; canonical keys to names created so far, and events are the events
 ;;; creating them, innermost first.
 
-(defun zq-quant-events (name args kind bound body-new key)
+(defun zq-quant-events (name args kind bound body-new key tbody)
+
+; Tbody is non-nil for a generated function, which is then entered in
+; zq-display-table so that its calls print as quantifiers.
+
   (declare (xargs :mode :program))
   (let ((bvars (if (cdr bound) bound (car bound))))
     `((def::un-skd ,name ,args (,kind ,bvars ,body-new))
-      (table zq-table ',key '(,name ,args ,kind ,bvars ,body-new)))))
+      (table zq-table ',key '(,name ,args ,kind ,bvars ,body-new))
+      ,@(and tbody
+             `((table zq-display-table ',name
+                      '(,args ,kind ,bound ,tbody)))))))
 
 (mutual-recursion
  (defun elab-q (x pending ctx wrld state)
@@ -293,7 +394,7 @@
                                 events
                               (append events
                                       (zq-quant-events name args kind bound
-                                                       body-new key)))))))))))
+                                                       body-new key tbody)))))))))))
     (t (elab-q-lst x pending ctx wrld state))))
  (defun elab-q-lst (x pending ctx wrld state)
    (declare (xargs :mode :program :stobjs state))
@@ -342,7 +443,7 @@
                 (let* ((key (zq-key kind bound args
                                     (placeholders-to-calls tbody-ph)))
                        (q-events (zq-quant-events name args kind bound
-                                                  body-new key)))
+                                                  body-new key nil)))
                   (value (append events
                                  (if (zq-lookup key (nth 2 r) wrld)
                                      (list (car q-events))
