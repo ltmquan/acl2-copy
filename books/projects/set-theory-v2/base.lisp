@@ -174,6 +174,138 @@
   (declare (ignore args))
   (thmz-quantifiers-fn ev))
 
+(defun zq-dcl-items (dcls)
+  (declare (xargs :mode :program))
+  (if (endp dcls)
+      nil
+    (append (and (consp (car dcls))
+                 (eq (car (car dcls)) 'declare)
+                 (cdr (car dcls)))
+            (zq-dcl-items (cdr dcls)))))
+
+(defun zq-xargs-values (items key)
+  (declare (xargs :mode :program))
+  (cond ((endp items) nil)
+        ((and (consp (car items))
+              (eq (car (car items)) 'xargs))
+         (let ((tail (assoc-keyword key (cdr (car items)))))
+           (append (and tail (list (cadr tail)))
+                   (zq-xargs-values (cdr items) key))))
+        (t (zq-xargs-values (cdr items) key))))
+
+(defun zq-has-type-dcl (items)
+  (declare (xargs :mode :program))
+  (cond ((endp items) nil)
+        ((and (consp (car items))
+              (eq (car (car items)) 'type))
+         t)
+        (t (zq-has-type-dcl (cdr items)))))
+
+(defun zq-verify-p (items wrld)
+  (declare (xargs :mode :program))
+  (let ((vg (zq-xargs-values items :verify-guards)))
+    (if vg
+        (car (last vg))
+      (let ((eagerness (acl2::default-verify-guards-eagerness wrld)))
+        (cond ((eql eagerness 0) nil)
+              ((eql eagerness 1)
+               (or (zq-xargs-values items :guard)
+                   (zq-xargs-values items :stobjs)
+                   (zq-has-type-dcl items)))
+              (t t))))))
+
+(defun zq-remove-keywords (keys kv)
+  (declare (xargs :mode :program))
+  (cond ((or (endp kv) (endp (cdr kv))) kv)
+        ((member-eq (car kv) keys) (zq-remove-keywords keys (cddr kv)))
+        (t (list* (car kv) (cadr kv) (zq-remove-keywords keys (cddr kv))))))
+
+(defun zq-strip-items (items)
+  (declare (xargs :mode :program))
+  (cond ((endp items) nil)
+        ((and (consp (car items))
+              (eq (car (car items)) 'xargs))
+         (let ((kv (zq-remove-keywords '(:verify-guards :guard-hints
+                                                        :guard-debug
+                                                        :guard-simplify)
+                                       (cdr (car items)))))
+           (if kv
+               (cons (cons 'xargs kv) (zq-strip-items (cdr items)))
+             (zq-strip-items (cdr items)))))
+        (t (cons (car items) (zq-strip-items (cdr items))))))
+
+(defun zq-verify-guards-event (name items)
+  (declare (xargs :mode :program))
+  (let ((hints (zq-xargs-values items :guard-hints))
+        (debug (zq-xargs-values items :guard-debug))
+        (simp (zq-xargs-values items :guard-simplify)))
+    `(verify-guards ,name
+                    ,@(and hints `(:hints ,(car (last hints))))
+                    ,@(and debug `(:guard-debug ,(car (last debug))))
+                    ,@(and simp `(:guard-simplify ,(car (last simp)))))))
+
+(defun defunz-events (name args dcls body ctx state)
+
+; If body is a quantifier at the top (with or without quantifiers inside it),
+; name itself is the defun-sk (with def::un-skd, so it is registered with
+; coi), the quantifiers inside are elaborated into generated functions as
+; usual, and name is entered in zq-table.  If its
+; formula is already there, for an earlier function, name replaces that
+; function in the table, with a warning: later quantifiers with that formula
+; become calls of name, the function defined last.  Otherwise name is defined
+; by defun, with the quantifiers in body elaborated.
+
+  (declare (xargs :mode :program :stobjs state))
+  (let* ((wrld (w state))
+         (items (zq-dcl-items dcls))
+         (verify (zq-verify-p items wrld)))
+    (cond
+     ((quant-form-p body)
+      (let ((kind (car body))
+            (bound (quant-bound-vars body)))
+        (er-let* ((r (elab-q (caddr body) nil verify ctx wrld state)))
+          (let ((body-new (nth 0 r))
+                (body-ph (nth 1 r))
+                (events (nth 3 r)))
+            (er-let* ((tbody-ph (acl2::translate body-ph t nil t ctx wrld
+                                                 state)))
+              (let* ((key (zq-key kind bound args
+                                  (placeholders-to-calls tbody-ph)))
+                     (old (zq-lookup key (nth 2 r) nil wrld))
+                     (new-dcls
+                      (and dcls
+                           `((declare ,@(zq-strip-items items)
+                                      (xargs :verify-guards nil))))))
+                (pprogn
+                 (if old
+                     (acl2::warning$ ctx "Zq"
+                                     "~x0 has the same formula as ~x1, ~
+                                      up to renaming of variables.  ~
+                                      Quantifiers with that formula will ~
+                                      now become calls of ~x0 instead of ~
+                                      ~x1."
+                                     name old)
+                   state)
+                 (value (append events
+                                (zq-quant-events
+                                 name args kind bound body-new key new-dcls
+                                 (and verify
+                                      (zq-verify-guards-event name items))
+                                 nil))))))))))
+     (t
+      (er-let* ((pr (elab-quantifiers body verify ctx state)))
+        (value (append (cdr pr)
+                       `((defun ,name ,args ,@dcls ,(car pr))))))))))
+
+(defmacro defunz (name args &rest rest)
+
+; (defunz name args dcl ... dcl body)
+
+  `(make-event
+    (er-let* ((evs (defunz-events ',name ',args ',(butlast rest 1)
+                     ',(car (last rest)) 'defunz state)))
+      (value (cons 'progn evs)))))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Primitives
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
