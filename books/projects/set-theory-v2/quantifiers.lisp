@@ -29,6 +29,28 @@
 ; coi/quantification: a defun-sk, disabled, with coi's rules and registration,
 ; so that the hints quant::inst? and quant::skosimp can instantiate and
 ; skolemize them automatically.
+;
+; In proof output, calls of generated functions are printed as the quantified
+; formulas they stand for (see "Display" below), so zq$n is normally not seen
+; in goals and checkpoints.  The names do still appear in a few places, since
+; zq$n are real functions and only the printing of terms is changed:
+;
+;   - in the output of coi's hints during a proof, for example
+;       Instantiable Formula In Goal:
+;          ZQ$1 : (EXISTS (Y) (AND (IN A Y) (IN Y X)))
+;       Computed Hint: (:USE (:INSTANCE ZQ$1-SUFF ...))
+;     (the first shows the formula next to the name);
+;   - in the summary of a proof, under Rules (for example
+;     (:REWRITE ZQ$1-BY-MULTIPLICITY)) and Hint-events (for example
+;     (:USE ZQ$1-SUFF));
+;   - in values that ACL2 prints as data rather than as terms, for example the
+;     result of (acl2::formula 'in-union nil (w state)), and in :pe of a
+;     generated function;
+;   - in the events that defunz, defthmzq and thmzq print when they run, which
+;     include the def::un-skd for each new zq$n.
+;
+; Each zq$n is a defun-sk for one quantified formula; :pe zq$n shows it, and
+; zq-table and zq-display-table record which formula it stands for.
 
 (in-package "ZF")
 
@@ -341,6 +363,12 @@
            (and (not (equal new term))
                 new)))))
 
+; WARNING: ACL2 has a single untranslate-preprocess entry.  Another book that
+; sets it, for example misc/untranslate-patterns, overrides this one if it is
+; included later, and is overridden by this one if it is included earlier.
+; Then calls of zq$n print as calls, or the other book's patterns are not
+; applied.  Nothing that is proved changes.
+
 (table acl2::user-defined-functions-table
        'acl2::untranslate-preprocess
        'zq-untranslate-preprocess)
@@ -418,9 +446,19 @@
 (defun defunz-events (name args dcls body ctx state)
 
 ; If body is a single quantifier, name itself is the defun-sk (with def::un-skd,
-; so it is registered with coi), and it is entered in zq-table unless its
-; formula is already there.  Otherwise name is defined by defun, with the
-; quantifiers in body elaborated.
+; so it is registered with coi), and it is entered in zq-table.  If its
+; formula is already there, for an earlier function, name replaces that
+; function in the table, with a warning: later quantifiers with that formula
+; become calls of name, the function defined last.  Otherwise name is defined
+; by defun, with the quantifiers in body elaborated.
+;
+; Declarations (dcls) are passed to the defun in the second case.  They are
+; not yet supported in the first case, where they would have to go to
+; def::un-skd and into the zq-table entry, so that the table guard can rebuild
+; the defun-sk.  A declaration always stays with name: the generated
+; functions for quantifiers inside body get none.  So name cannot have its
+; guards verified when body has a quantifier, since a defun-sk is not
+; executable and its guards are not verified.
 
   (declare (xargs :mode :program :stobjs state))
   (let ((wrld (w state)))
@@ -442,12 +480,21 @@
                                                    state)))
                 (let* ((key (zq-key kind bound args
                                     (placeholders-to-calls tbody-ph)))
-                       (q-events (zq-quant-events name args kind bound
-                                                  body-new key nil)))
-                  (value (append events
-                                 (if (zq-lookup key (nth 2 r) wrld)
-                                     (list (car q-events))
-                                   q-events)))))))))))
+                       (old (zq-lookup key (nth 2 r) wrld)))
+                  (pprogn
+                   (if old
+                       (acl2::warning$ ctx "Zq"
+                                       "~x0 has the same formula as ~x1, ~
+                                        up to renaming of variables.  ~
+                                        Quantifiers with that formula will ~
+                                        now become calls of ~x0 instead of ~
+                                        ~x1."
+                                       name old)
+                     state)
+                   (value (append events
+                                  (zq-quant-events name args kind bound
+                                                   body-new key
+                                                   nil))))))))))))
      (t
       (er-let* ((pr (elab-quantifiers body ctx state)))
         (value (append (cdr pr)

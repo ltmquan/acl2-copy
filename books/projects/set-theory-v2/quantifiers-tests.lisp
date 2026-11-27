@@ -139,3 +139,23 @@
 (acl2::must-fail
  (table zq-display-table 'zq$1
         '((a x) forall (y) (if (in a y) (in y x) 'nil))))
+
+;;; A later function with the same formula replaces the earlier one in
+;;; zq-table (with a warning), so later quantifiers become calls of it.
+
+(defunz subset2 (s u)
+  (forall b (implies (in b s) (in b u))))
+
+(assert-event
+ (equal (zq-lookup '(forall 1 2 (implies (in zq-b0 zq-f0) (in zq-b0 zq-f1)))
+                   nil (w state))
+        'subset2))
+
+(defunz all-subsets2 (x y)
+  (forall z (implies (in z x)
+                     (forall a (implies (in a z) (in a y))))))
+
+(assert-event
+ (equal (acl2::formula 'all-subsets2-necc nil (w state))
+        '(implies (not (implies (in z x) (subset2 z y)))
+                  (not (all-subsets2 x y)))))
