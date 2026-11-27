@@ -78,4 +78,4 @@
  (thmz (equal (zimg x (pair x x) (pair x x)) 0)))
 
 (acl2::must-fail
- (table zfc-table 'singletons$prop '(zimg singletons (a) x a (cons x x))))
+ (table zfc-table 'singletons$prop '(zimg singletons (a) x a (cons x x) nil)))

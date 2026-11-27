@@ -277,7 +277,76 @@
                     ,@(and debug `(:guard-debug ,(car (last debug))))
                     ,@(and simp `(:guard-simplify ,(car (last simp)))))))
 
-(defun defunz-events (name args dcls body ctx state)
+(defun zq-split-defunz (rest)
+
+  (declare (xargs :mode :program))
+  (cond ((endp rest) (mv nil nil nil))
+        ((or (stringp (car rest))
+             (and (consp (car rest))
+                  (eq (car (car rest)) 'declare)))
+         (mv-let (dcls body opts)
+           (zq-split-defunz (cdr rest))
+           (mv (cons (car rest) dcls) body opts)))
+        (t (mv nil (car rest) (cdr rest)))))
+
+(defun zq-type-guards (spec vars wrld)
+  (declare (xargs :mode :program))
+  (if (endp vars)
+      nil
+    (cons (acl2::translate-declaration-to-guard spec (car vars) wrld)
+          (zq-type-guards spec (cdr vars) wrld))))
+
+(defun zq-set-guard-terms (items wrld)
+  (declare (xargs :mode :program))
+  (cond ((endp items) nil)
+        ((and (consp (car items))
+              (eq (car (car items)) 'xargs)
+              (keyword-value-listp (cdr (car items)))
+              (subsetp-eq (evens (cdr (car items)))
+                          '(:guard :verify-guards)))
+         (let ((tail (assoc-keyword :guard (cdr (car items))))
+               (rest (zq-set-guard-terms (cdr items) wrld)))
+           (and (not (eq rest :bad))
+                (if tail (cons (cadr tail) rest) rest))))
+        ((and (consp (car items))
+              (eq (car (car items)) 'type)
+              (consp (cdr (car items))))
+         (let ((rest (zq-set-guard-terms (cdr items) wrld)))
+           (and (not (eq rest :bad))
+                (append (zq-type-guards (cadr (car items)) (cddr (car items))
+                                        wrld)
+                        rest))))
+        (t :bad)))
+
+(defun defunz-set-events (name args dcls body kind ctx wrld state)
+  (declare (xargs :mode :program :stobjs state))
+  (let ((terms (zq-set-guard-terms (zq-dcl-items dcls) wrld)))
+    (if (eq terms :bad)
+        (er soft ctx
+            "Only guards (xargs :guard and type declarations) are supported ~
+             when the body is a ~x0 at the top, as for ~x1."
+            (car body) name)
+      (er-let* ((p (elab-zsub-parts body nil nil ctx wrld state)))
+        (let* ((xv (cadr body))
+               (guard (and terms `(and ,@terms)))
+               (key (zs-key kind args xv (nth 2 p) (nth 3 p)))
+               (old (zs-lookup key (nth 4 p) wrld)))
+          (pprogn
+           (if old
+               (acl2::warning$ ctx "Zq"
+                               "~x0 is the same set as ~x1, up to renaming of ~
+                                variables.  Sets with that formula will now ~
+                                become calls of ~x0 instead of ~x1."
+                               name old)
+             state)
+           (value (append (nth 5 p)
+                          (if (eq kind :zsub)
+                              `((zsub-define ,name ,args ,xv ,(nth 0 p)
+                                             ,(nth 1 p) ,guard))
+                            (zimg-events name args xv (nth 0 p) (nth 1 p)
+                                         (nth 2 p) (nth 3 p) guard))))))))))
+
+(defun defunz-events (name args dcls body opts disable ctx state)
 
 ; If body is a quantifier at the top (with or without quantifiers inside it),
 ; name itself is the defun-sk (with def::un-skd, so it is registered with
@@ -293,93 +362,150 @@
          (items (zq-dcl-items dcls))
          (verify (zq-verify-p items wrld)))
     (cond
+     ((not (keyword-value-listp opts))
+      (er soft ctx
+          "After the body of ~x0, only keyword options are allowed, but ~x1 ~
+           is not a list of keyword options."
+          name opts))
+     ((zq-binder-calls-p body (list name))
+      (er soft ctx
+          "~x0 calls itself inside a quantifier or set-builder.  The function ~
+           generated for that quantifier or set would have to be mutually ~
+           recursive with ~x0, which ACL2 does not allow."
+          name))
      ((quant-form-p body)
-      (let ((kind (car body))
-            (bound (quant-bound-vars body)))
-        (er-let* ((r (elab-q (caddr body) nil verify ctx wrld state)))
-          (let ((body-new (nth 0 r))
-                (body-ph (nth 1 r))
-                (events (nth 3 r)))
-            (er-let* ((tbody-ph (acl2::translate body-ph t nil t ctx wrld
-                                                 state)))
-              (let* ((key (zq-key kind bound args
-                                  (placeholders-to-calls tbody-ph)))
-                     (old (zq-lookup key (nth 2 r) nil wrld))
-                     (new-dcls
-                      (and dcls
-                           `((declare ,@(zq-strip-items items)
-                                      (xargs :verify-guards nil))))))
-                (pprogn
-                 (if old
-                     (acl2::warning$ ctx "Zq"
-                                     "~x0 has the same formula as ~x1, ~
-                                      up to renaming of variables.  ~
-                                      Quantifiers with that formula will ~
-                                      now become calls of ~x0 instead of ~
-                                      ~x1."
-                                     name old)
-                   state)
-                 (value (append events
-                                (zq-quant-events
-                                 name args kind bound body-new key new-dcls
-                                 (and verify
-                                      (zq-verify-guards-event name items))
-                                 nil))))))))))
+      (if (not (subsetp-eq (evens opts)
+                           (cons :skolemize *zq-defun-sk-options*)))
+          (er soft ctx
+              "The options allowed when the body is a quantifier at the top ~
+               are ~&0, but ~x1 has ~x2."
+              (cons :skolemize *zq-defun-sk-options*) name opts)
+        (let ((kind (car body))
+              (bound (quant-bound-vars body)))
+          (er-let* ((r (elab-q (caddr body) nil verify ctx wrld state)))
+            (let ((body-new (nth 0 r))
+                  (body-ph (nth 1 r))
+                  (events (nth 3 r)))
+              (er-let* ((tbody-ph (acl2::translate body-ph t nil t ctx wrld
+                                                   state)))
+                (let* ((key (zq-key kind bound args
+                                    (placeholders-to-calls tbody-ph)))
+                       (old (zq-lookup key (nth 2 r) nil wrld))
+                       (new-dcls
+                        (and dcls
+                             `((declare ,@(zq-strip-items items)
+                                        (xargs :verify-guards nil))))))
+                  (pprogn
+                   (if old
+                       (acl2::warning$ ctx "Zq"
+                                       "~x0 has the same formula as ~x1, ~
+                                        up to renaming of variables.  ~
+                                        Quantifiers with that formula will ~
+                                        now become calls of ~x0 instead of ~
+                                        ~x1."
+                                       name old)
+                     state)
+                   (value (append events
+                                  (zq-quant-events
+                                   name args kind bound body-new key new-dcls
+                                   opts
+                                   (and verify
+                                        (zq-verify-guards-event name items))
+                                   nil)))))))))))
+     (opts
+      (er soft ctx
+          "Options after the body are allowed only when the body is a ~
+           quantifier at the top, but ~x0 has ~x1."
+          name opts))
      ((zsub-form-p body)
-      (if dcls
-          (er soft ctx
-              "Declarations are not supported when the body is a zsub at ~
-               the top, as for ~x0."
-              name)
-        (er-let* ((p (elab-zsub-parts body nil verify ctx wrld state)))
-          (let* ((xv (cadr body))
-                 (key (zs-key :zsub args xv (nth 2 p) (nth 3 p)))
-                 (old (zs-lookup key (nth 4 p) wrld)))
-            (pprogn
-             (if old
-                 (acl2::warning$ ctx "Zq"
-                                 "~x0 is the same set as ~x1, up to renaming ~
-                                  of variables.  Sets with that formula will ~
-                                  now become calls of ~x0 instead of ~x1."
-                                 name old)
-               state)
-             (value (append (nth 5 p)
-                            `((zsub-define ,name ,args ,xv ,(nth 0 p)
-                                           ,(nth 1 p))))))))))
+      (defunz-set-events name args dcls body :zsub ctx wrld state))
      ((zimg-form-p body)
-      (if dcls
-          (er soft ctx
-              "Declarations are not supported when the body is a zimg at ~
-               the top, as for ~x0."
-              name)
-        (er-let* ((p (elab-zsub-parts body nil verify ctx wrld state)))
-          (let* ((xv (cadr body))
-                 (key (zs-key :zimg args xv (nth 2 p) (nth 3 p)))
-                 (old (zs-lookup key (nth 4 p) wrld)))
-            (pprogn
-             (if old
-                 (acl2::warning$ ctx "Zq"
-                                 "~x0 is the same set as ~x1, up to renaming ~
-                                  of variables.  Sets with that formula will ~
-                                  now become calls of ~x0 instead of ~x1."
-                                 name old)
-               state)
-             (value (append (nth 5 p)
-                            (zimg-events name args xv (nth 0 p) (nth 1 p)
-                                         (nth 2 p) (nth 3 p)))))))))
+      (defunz-set-events name args dcls body :zimg ctx wrld state))
      (t
       (er-let* ((pr (elab-quantifiers body verify ctx state)))
         (value (append (cdr pr)
-                       `((defun ,name ,args ,@dcls ,(car pr))))))))))
+                       `((,(if disable 'defund 'defun)
+                          ,name ,args ,@dcls ,(car pr))))))))))
+
+(defun defunz-fn (name args rest disable ctx state)
+  (declare (xargs :mode :program :stobjs state))
+  (mv-let (dcls body opts)
+    (zq-split-defunz rest)
+    (defunz-events name args dcls body opts disable ctx state)))
 
 (defmacro defunz (name args &rest rest)
 
-; (defunz name args dcl ... dcl body)
+; (defunz name args dcl ... dcl body option ... option)
 
   `(make-event
-    (er-let* ((evs (defunz-events ',name ',args ',(butlast rest 1)
-                     ',(car (last rest)) 'defunz state)))
+    (er-let* ((evs (defunz-fn ',name ',args ',rest nil 'defunz state)))
       (value (cons 'progn evs)))))
+
+(defmacro defundz (name args &rest rest)
+  `(make-event
+    (er-let* ((evs (defunz-fn ',name ',args ',rest t 'defundz state)))
+      (value (cons 'progn evs)))))
+
+(defun mutual-recursionz-defs (forms names pending ctx wrld state)
+
+  (declare (xargs :mode :program :stobjs state))
+  (if (endp forms)
+      (value (list nil pending nil))
+    (let ((form (car forms)))
+      (case-match form
+        ((macro name args . rest)
+         (mv-let (dcls body opts)
+           (zq-split-defunz rest)
+           (cond
+            ((not (member-eq macro '(defunz defundz)))
+             (er soft ctx
+                 "Each form of mutual-recursionz must be a call of defunz or ~
+                  defundz, but ~x0 is not."
+                 form))
+            (opts
+             (er soft ctx
+                 "Options after the body are not allowed in ~
+                  mutual-recursionz, but ~x0 has ~x1."
+                 name opts))
+            ((or (quant-form-p body) (zsub-form-p body) (zimg-form-p body))
+             (er soft ctx
+                 "The body of ~x0 is a quantifier or set-builder at the top, ~
+                  which mutual-recursionz does not allow, since ~x0 would be ~
+                  a defun-sk or a set."
+                 name))
+            ((zq-binder-calls-p body names)
+             (er soft ctx
+                 "~x0 calls one of ~&1 inside a quantifier or set-builder.  ~
+                  The function generated for that quantifier or set would ~
+                  have to be in the mutual recursion, which ACL2 does not ~
+                  allow."
+                 name names))
+            (t
+             (er-let* ((r (elab-q body pending
+                                  (zq-verify-p (zq-dcl-items dcls) wrld)
+                                  ctx wrld state))
+                       (more (mutual-recursionz-defs (cdr forms) names
+                                                     (nth 2 r) ctx wrld
+                                                     state)))
+               (value
+                (list (cons `(,(if (eq macro 'defundz) 'defund 'defun)
+                              ,name ,args ,@dcls ,(nth 0 r))
+                            (nth 0 more))
+                      (nth 1 more)
+                      (append (nth 3 r) (nth 2 more)))))))))
+        (& (er soft ctx
+               "Each form of mutual-recursionz must be a call of defunz or ~
+                defundz, but ~x0 is not."
+               form))))))
+
+(defmacro mutual-recursionz (&rest forms)
+  `(make-event
+    (er-let* ((r (mutual-recursionz-defs ',forms
+                                         ',(strip-cadrs forms)
+                                         nil 'mutual-recursionz (w state)
+                                         state)))
+      (value `(progn ,@(nth 2 r)
+                     (mutual-recursion ,@(nth 0 r)))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Primitives
@@ -651,7 +777,7 @@
     :check-expansion t
     :expansion? (value-triple nil)))
 
-(defun zsub-form-and-prop (name args x s u)
+(defun zsub-form-and-prop (name args x s u guard)
   (declare (xargs :guard t))
   (let* ((name$prop (and (symbolp name)
                          (suffix-symbol "$PROP" name)))
@@ -659,7 +785,9 @@
                                   (packn (list name '$comprehension)))))
     (mv `(encapsulate
            (((,name$prop) => *)
-            ((,name ,@(make-list (len args) :initial-element '*)) => *))
+            ((,name ,@(make-list (len args) :initial-element '*)) => *
+             :formals ,args
+             ,@(and guard `(:guard ,guard))))
            (check-zsub ,name ,args ,x ,s ,u)
            (local (defun ,name$prop ()
                     nil))
@@ -683,7 +811,7 @@
                                   ,u)))))
         name$prop)))
 
-(defmacro zsub-define (name args x s u &key verbose)
+(defmacro zsub-define (name args x s u guard &key verbose)
 
 ; We introduce a set for {x \in s: u}.
 
@@ -700,15 +828,16 @@
 
   (declare (xargs :guard t))
   (mv-let (form prop)
-    (zsub-form-and-prop name args x s u)
+    (zsub-form-and-prop name args x s u guard)
     (let ((ev `(progn ,form
-                      (table zfc-table ',prop '(zsub ,name ,args ,x ,s ,u))
+                      (table zfc-table ',prop
+                             '(zsub ,name ,args ,x ,s ,u ,guard))
                       (value-triple ',name))))
       (cond (verbose ev)
             (t `(with-output :off (:other-than error) :gag-mode nil
                   ,ev))))))
 
-(defun zimg-form-and-prop (name args x a term)
+(defun zimg-form-and-prop (name args x a term guard)
   (declare (xargs :mode :program))
   (let* ((name$prop (suffix-symbol "$PROP" name))
          (name$replacement (packn (list name '$replacement)))
@@ -716,7 +845,9 @@
          (y (zimg-y x args)))
     (mv `(encapsulate
            (((,name$prop) => *)
-            ((,name ,@(make-list (len args) :initial-element '*)) => *))
+            ((,name ,@(make-list (len args) :initial-element '*)) => *
+             :formals ,args
+             ,@(and guard `(:guard ,guard))))
            (local (defun ,name$prop ()
                     nil))
            (local (defun-nx ,name ,args
@@ -751,12 +882,13 @@
              (eq (nth 0 (cdr pair)) (zimg-exists-name name))
              (equal (nth 1 (cdr pair)) qargs))))))
 
-(defmacro zimg-define (name args x a term)
+(defmacro zimg-define (name args x a term guard)
   (mv-let (form prop)
-    (zimg-form-and-prop name args x a term)
+    (zimg-form-and-prop name args x a term guard)
     `(with-output :off (:other-than error) :gag-mode nil
        (progn ,form
-              (table zfc-table ',prop '(zimg ,name ,args ,x ,a ,term))
+              (table zfc-table ',prop
+                     '(zimg ,name ,args ,x ,a ,term ,guard))
               (value-triple ',name)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -801,14 +933,14 @@
    ((immediately-encapsulated-in-pass-2-p key world)
     t)
    (t (case-match val
-        (('zsub name args x a u)
+        (('zsub name args x a u guard)
          (mv-let (form prop)
-           (zsub-form-and-prop name args x a u)
+           (zsub-form-and-prop name args x a u guard)
            (and (eq key prop)
                 (equal form (get-event name world)))))
-        (('zimg name args x a term)
+        (('zimg name args x a term guard)
          (mv-let (form prop)
-           (zimg-form-and-prop name args x a term)
+           (zimg-form-and-prop name args x a term guard)
            (and (eq key prop)
                 (equal form (get-event name world))
                 (zimg-exists-ok name args x a term world))))

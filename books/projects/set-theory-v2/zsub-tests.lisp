@@ -88,7 +88,7 @@
 
 (assert-event
  (let* ((wrld (w state))
-        (name (zs-lookup (zs-key '(a b c) 'x '(pair a b) '(in x c)) nil wrld)))
+        (name (zs-lookup (zs-key :zsub '(a b c) 'x '(pair a b) '(in x c)) nil wrld)))
    (equal (zq-untranslate-preprocess (list name 'p 'q 'x) wrld)
           '(zsub x1 (pair p q) (in x1 x)))))
 
@@ -100,4 +100,4 @@
 
 ; Zfc-table refuses an entry that does not name the event zsub-define makes.
 (acl2::must-fail
- (table zfc-table 'inter$prop '(zsub inter (a b) x a (not (in x b)))))
+ (table zfc-table 'inter$prop '(zsub inter (a b) x a (not (in x b)) nil)))

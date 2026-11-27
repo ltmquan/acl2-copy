@@ -98,24 +98,24 @@
 ;  - the key of subset with the arguments swapped.
 (acl2::must-fail
  (table zq-table '(forall 1 2 (implies (in zq-b0 zq-f0) (in zq-b0 zq-f1)))
-        '(union2 (x y) forall a (implies (in a x) (in a y)) nil)))
+        '(union2 (x y) forall a (implies (in a x) (in a y)) nil nil)))
 (acl2::must-fail
  (table zq-table '(exists 1 2 (if (in zq-f0 zq-b0) (in zq-b0 zq-f1) 'nil))
-        '(subset (x y) forall a (implies (in a x) (in a y)) nil)))
+        '(subset (x y) forall a (implies (in a x) (in a y)) nil nil)))
 (acl2::must-fail
  (table zq-table '(exists 1 2 (if (in zq-f0 zq-b0) (in zq-b0 zq-f1) 'nil))
-        '(subset (a x) exists y (and (in a y) (in y x)) nil)))
+        '(subset (a x) exists y (and (in a y) (in y x)) nil nil)))
 (acl2::must-fail
  (table zq-table '(forall 1 2 (implies (in zq-b0 zq-f1) (in zq-b0 zq-f0)))
-        '(subset (x y) forall a (implies (in a x) (in a y)) nil)))
+        '(subset (x y) forall a (implies (in a x) (in a y)) nil nil)))
 (acl2::must-fail
  (table zq-table '(forall 1 2 (implies (in zq-b0 zq-f0) (in zq-b0 zq-f1)))
         '(subset (x y) forall a (implies (in a x) (in a y))
-                 ((declare (xargs :guard (consp x)))))))
+                 ((declare (xargs :guard (consp x)))) nil)))
 
 ; A correct entry is accepted (it is already present, so this is a no-op).
 (table zq-table '(forall 1 2 (implies (in zq-b0 zq-f0) (in zq-b0 zq-f1)))
-       '(subset (x y) forall a (implies (in a x) (in a y)) nil))
+       '(subset (x y) forall a (implies (in a x) (in a y)) nil nil))
 
 ;;; Display: generated functions print as the quantifiers they stand for
 

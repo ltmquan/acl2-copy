@@ -203,7 +203,7 @@
 
   (declare (xargs :mode :program))
   (case-match val
-    ((tag & args x s u)
+    ((tag & args x s u &)
      (mv-let (erp1 ts)
        (acl2::translate-cmp s t nil t 'zs-entry-key wrld
                             (acl2::default-state-vars nil))
@@ -297,24 +297,54 @@
      (or (find-witness-encapsulate witness (car x))
          (find-witness-encapsulate-lst witness (cdr x))))))
 
-(defun zq-witness-event (name args kind bvars body dcls)
+(defconst *zq-defun-sk-options*
+  '(:quant-ok :skolem-name :thm-name :rewrite :strengthen))
 
-; The encapsulate introducing name-witness that def::un-skd produces.
+(defun zq-option (key opts)
+  (declare (xargs :mode :program))
+  (cadr (assoc-keyword key opts)))
+
+(defun zq-witness-name (name opts)
+  (declare (xargs :mode :program))
+  (or (zq-option :skolem-name opts)
+      (acl2::add-suffix name "-WITNESS")))
+
+(defun zq-rekey (key val)
+  (declare (xargs :mode :program))
+  (and val (list key val)))
+
+(defun zq-witness-event (name args kind bvars body dcls opts)
+
+; The encapsulate introducing the witness of name that def::un-skd produces.
 
   (declare (xargs :mode :program))
-  (let* ((witness (acl2::add-suffix name "-WITNESS"))
-         (thm (acl2::add-suffix name (if (eq kind 'exists) "-SUFF" "-NECC")))
+  (let* ((witness (zq-witness-name name opts))
+         (thm (or (zq-option :thm-name opts)
+                  (acl2::add-suffix name (if (eq kind 'exists)
+                                             "-SUFF"
+                                           "-NECC"))))
          (rest `(,@dcls (,kind ,bvars ,body)
-                        :skolem-name ,witness :thm-name ,thm)))
+                        ,@(zq-rekey :quant-ok (zq-option :quant-ok opts))
+                        :skolem-name ,witness :thm-name ,thm
+                        ,@(zq-rekey :rewrite (zq-option :rewrite opts))
+                        ,@(zq-rekey :strengthen
+                                    (zq-option :strengthen opts)))))
     (find-witness-encapsulate
      witness
      (strip-with-output
       (acl2::defun-sk-fn `(defun-sk ,name ,args ,@rest) name args rest)))))
 
+(defun zq-options-p (opts)
+  (declare (xargs :mode :program))
+  (cond ((endp opts) (null opts))
+        ((endp (cdr opts)) nil)
+        (t (and (member-eq (car opts) *zq-defun-sk-options*)
+                (zq-options-p (cddr opts))))))
+
 (defun zq-table-guard (key val wrld)
   (declare (xargs :mode :program)) ; because of get-event
   (case-match val
-    ((name args kind bvars body dcls)
+    ((name args kind bvars body dcls opts)
      (and (symbolp name)
           name
           (symbol-listp args)
@@ -323,15 +353,16 @@
           (or (and (symbolp bvars) bvars)
               (and (symbol-listp bvars) (consp bvars)))
           (true-listp dcls)
+          (zq-options-p opts)
           (let ((bound (if (symbolp bvars) (list bvars) bvars)))
             (mv-let (erp tbody)
               (acl2::translate-cmp body t nil t 'zq-table-guard wrld
                                    (acl2::default-state-vars nil))
               (and (not erp)
                    (equal key (zq-key kind bound args tbody))
-                   (equal (zq-witness-event name args kind bvars body dcls)
-                          (get-event (acl2::add-suffix name "-WITNESS")
-                                     wrld)))))))
+                   (equal (zq-witness-event name args kind bvars body dcls
+                                            opts)
+                          (get-event (zq-witness-name name opts) wrld)))))))
     (& nil)))
 
 (table zq-table nil nil
@@ -380,7 +411,7 @@
                                      (table-alist 'zfc-table wrld))))
                (tag (if (eq kind :zsub) 'zsub 'zimg)))
            (case-match entry
-             ((!tag !key !formals !bound s u)
+             ((!tag !key !formals !bound s u &)
               (mv-let (erp1 ts2)
                 (acl2::translate-cmp s t nil t 'zq-display-guard wrld
                                      (acl2::default-state-vars nil))
@@ -484,8 +515,16 @@
 ;;; canonical keys to names created so far, and events are the events
 ;;; creating them, innermost first.
 
-(defun zq-quant-events (name args kind bound body-new key dcls verify-event
-                             tbody)
+(defun zq-sk-options (opts)
+
+  (declare (xargs :mode :program))
+  (cond ((or (endp opts) (endp (cdr opts))) nil)
+        ((member-eq (car opts) *zq-defun-sk-options*)
+         (list* (car opts) (cadr opts) (zq-sk-options (cddr opts))))
+        (t (zq-sk-options (cddr opts)))))
+
+(defun zq-quant-events (name args kind bound body-new key dcls opts
+                             verify-event tbody)
 
 ; Tbody is non-nil for a generated function, which is then entered in
 ; zq-display-table so that its calls print as quantifiers.
@@ -493,9 +532,12 @@
   (declare (xargs :mode :program))
   (let ((bvars (if (cdr bound) bound (car bound))))
     `((def::un-skd ,name ,args (,kind ,bvars ,body-new)
-        ,@(and dcls `(:witness-dcls ,dcls)))
+        ,@(and dcls `(:witness-dcls ,dcls))
+        ,@opts)
       ,@(and verify-event (list verify-event))
-      (table zq-table ',key '(,name ,args ,kind ,bvars ,body-new ,dcls))
+      (table zq-table ',key
+             '(,name ,args ,kind ,bvars ,body-new ,dcls
+                     ,(zq-sk-options opts)))
       ,@(and tbody
              `((table zq-display-table ',name
                       '(,args ,kind ,bound ,tbody)))))))
@@ -508,7 +550,7 @@
   (declare (xargs :mode :program))
   (packn (list name '$exists)))
 
-(defun zimg-events (name args x a-new term-new ta tterm)
+(defun zimg-events (name args x a-new term-new ta tterm guard)
   (declare (xargs :mode :program))
   (let* ((y (zimg-y x args))
          (qargs (cons y args))
@@ -517,8 +559,8 @@
     (append (zq-quant-events q qargs 'exists (list x)
                              `(and (in ,x ,a-new) (equal ,y ,term-new))
                              (zq-key 'exists (list x) qargs tbody)
-                             nil nil tbody)
-            `((zimg-define ,name ,args ,x ,a-new ,term-new)))))
+                             nil nil nil tbody)
+            `((zimg-define ,name ,args ,x ,a-new ,term-new ,guard)))))
 
 (mutual-recursion
  (defun elab-q (x pending verify ctx wrld state)
@@ -552,7 +594,7 @@
                        ((not old)
                         (append events
                                 (zq-quant-events
-                                 name args kind bound body-new key nil
+                                 name args kind bound body-new key nil nil
                                  (and verify `(verify-guards ,name))
                                  tbody)))
                        ((and verify
@@ -584,7 +626,7 @@
                 (if old
                     events
                   (append events
-                          `((zsub-define ,name ,args ,xv ,s-new ,phi-new)
+                          `((zsub-define ,name ,args ,xv ,s-new ,phi-new nil)
                             (table zq-display-table ',name
                                    '(,args :zsub ,xv (,ts ,tphi)))))))))))
     ((zimg-form-p x)
@@ -610,7 +652,8 @@
                 (if old
                     events
                   (append events
-                          (zimg-events name args xv a-new term-new ta tterm)
+                          (zimg-events name args xv a-new term-new ta tterm
+                                       nil)
                           `((table zq-display-table ',name
                                    '(,args :zimg ,xv (,ta ,tterm)))))))))))
     (t (elab-q-lst x pending verify ctx wrld state))))
@@ -649,6 +692,32 @@
   (declare (xargs :mode :program :stobjs state))
   (er-let* ((r (elab-q term nil verify ctx (w state) state)))
     (value (cons (nth 0 r) (nth 3 r)))))
+
+(mutual-recursion
+ (defun zq-calls-p (x names)
+   (declare (xargs :mode :program))
+   (cond ((or (atom x) (eq (car x) 'quote)) nil)
+         ((member-eq (car x) names) t)
+         (t (zq-calls-p-lst x names))))
+ (defun zq-calls-p-lst (x names)
+   (declare (xargs :mode :program))
+   (and (consp x)
+        (or (zq-calls-p (car x) names)
+            (zq-calls-p-lst (cdr x) names)))))
+
+(mutual-recursion
+ (defun zq-binder-calls-p (x names)
+
+   (declare (xargs :mode :program))
+   (cond ((or (atom x) (eq (car x) 'quote)) nil)
+         ((or (quant-form-p x) (zsub-form-p x) (zimg-form-p x))
+          (zq-calls-p (cddr x) names))
+         (t (zq-binder-calls-p-lst x names))))
+ (defun zq-binder-calls-p-lst (x names)
+   (declare (xargs :mode :program))
+   (and (consp x)
+        (or (zq-binder-calls-p (car x) names)
+            (zq-binder-calls-p-lst (cdr x) names)))))
 
 (mutual-recursion
  (defun zq-has-quantifier (x)
